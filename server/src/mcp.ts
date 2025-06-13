@@ -31,7 +31,7 @@ export function createMcpServer(): McpServer {
         if (typeof apy !== "number") {
           throw new Error("Invalid APY format received from API.");
         }
-        const apyString = `${(apy * 100).toFixed(2)}%`;
+        const apyString = `${apy.toFixed(2)}%`;
         return {
           content: [{ type: "text", text: apyString }],
         };
