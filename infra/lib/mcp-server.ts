@@ -88,7 +88,7 @@ export class McpServer extends cdk.Stack {
     });
 
     // Create ECS service
-    new cdk.aws_ecs.Ec2Service(this, `${id}McpServerService`, {
+    new cdk.aws_ecs.Ec2Service(this, `${id}Service`, {
       cluster,
       taskDefinition,
       desiredCount: 1,
