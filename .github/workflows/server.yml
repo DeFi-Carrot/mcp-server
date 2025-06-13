@@ -1,0 +1,46 @@
+name: server
+
+on:
+  workflow_call:
+    secrets:
+      aws-access-key-id:
+        required: true
+      aws-secret-access-key:
+        required: true
+    push:
+      paths:
+        - 'server/**'
+      branches:
+        - main
+
+concurrency:
+  group: server
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: server/package-lock.json
+      
+      - name: Check Formatting
+        run: |
+          cd server/
+          make fmt_check
+
+      - name: Build and push container image to Amazon ECR
+        run: |
+          cd server/
+          make push
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID_PRODUCTION }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY_PRODUCTION }}
+          AWS_DEFAULT_REGION: us-east-2

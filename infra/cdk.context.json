@@ -1,0 +1,46 @@
+{
+  "vpc-provider:account=058264184558:filter.tag:Name=CarrotCore/CarrotCoreVPC:region=us-east-2:returnAsymmetricSubnets=true": {
+    "vpcId": "vpc-0836e1b6de3137ec3",
+    "vpcCidrBlock": "10.0.0.0/16",
+    "ownerAccountId": "058264184558",
+    "availabilityZones": [],
+    "subnetGroups": [
+      {
+        "name": "public",
+        "type": "Public",
+        "subnets": [
+          {
+            "subnetId": "subnet-0f5b2a6266b309a97",
+            "cidr": "10.0.2.0/24",
+            "availabilityZone": "us-east-2a",
+            "routeTableId": "rtb-0eb4444142436dd63"
+          },
+          {
+            "subnetId": "subnet-06724f0620631a01c",
+            "cidr": "10.0.3.0/24",
+            "availabilityZone": "us-east-2b",
+            "routeTableId": "rtb-0afcd3612b254a46f"
+          }
+        ]
+      },
+      {
+        "name": "private with egress",
+        "type": "Private",
+        "subnets": [
+          {
+            "subnetId": "subnet-05a4b31e2ef790692",
+            "cidr": "10.0.0.0/24",
+            "availabilityZone": "us-east-2a",
+            "routeTableId": "rtb-038e6d083b17af940"
+          },
+          {
+            "subnetId": "subnet-026c29fe03918ffa3",
+            "cidr": "10.0.1.0/24",
+            "availabilityZone": "us-east-2b",
+            "routeTableId": "rtb-08680d31f41d26882"
+          }
+        ]
+      }
+    ]
+  }
+}

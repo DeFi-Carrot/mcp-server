@@ -1,0 +1,38 @@
+name: server-infra
+
+on:
+  push:
+    paths:
+      - 'infra/**'
+    branches:
+      - main
+
+concurrency:
+  group: server-infra
+  cancel-in-progress: false
+
+jobs:
+  server-infra:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: infra/package-lock.json
+
+      - name: Deploy
+        run: |
+          cd infra/
+          npm ci
+          npx cdk diff
+          npx cdk deploy --require-approval never 
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID_PRODUCTION }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY_PRODUCTION }}
+          AWS_DEFAULT_REGION: 'us-east-2'
