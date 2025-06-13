@@ -8,8 +8,10 @@ build:
 clean:
 	npm run clean
 
-dev:
-	npm run dev
+push:
+	npm run docker:build
+	npm run docker:tag
+	npm run docker:push
 
 start:
 	npm run start
