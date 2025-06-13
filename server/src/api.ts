@@ -1,5 +1,8 @@
 import express from "express";
 import { Router } from "./router.js";
+import { logger } from "./utils.js";
+import packageJson from "../package.json" with { type: "json" };
+const { version } = packageJson;
 
 export class Api {
   private app: express.Express;
@@ -18,6 +21,7 @@ export class Api {
   }
 
   async listen(port: number = 8080): Promise<void> {
+    logger.info("starting carrot-mcp-server", { port, version });
     this.app.listen(port, () => {});
   }
 }
