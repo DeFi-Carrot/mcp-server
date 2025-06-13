@@ -1,23 +1,9 @@
-import express from "express";
-import { mcpRouter } from "./router.js";
-
-// Create the main Express application
-const app = express();
-
-// Use middleware to parse JSON request bodies
-app.use(express.json());
-
-// index route
-app.use("/", (_req, res) => {
-  res.sendStatus(200);
-});
-
-// Mount the MCP router to handle all /mcp traffic
-app.use("/mcp", mcpRouter);
+import { Api } from "./api.js";
 
 // Start the server
 async function main() {
-  app.listen(8080);
+  const api = new Api();
+  await api.listen();
 }
 
 // Run the server
