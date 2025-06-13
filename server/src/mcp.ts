@@ -40,7 +40,7 @@ export function createMcpServer(): McpServer {
           error instanceof Error ? error.message : "An unknown error occurred";
         return {
           content: [
-            { type: "text", text: `Error fetching APY: ${errorMessage}` },
+            { type: "text", text: `Error fetching CRT APY: ${errorMessage}` },
           ],
           isError: true,
         };
