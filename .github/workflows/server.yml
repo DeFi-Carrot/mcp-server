@@ -1,17 +1,11 @@
 name: server
 
 on:
-  workflow_call:
-    secrets:
-      aws-access-key-id:
-        required: true
-      aws-secret-access-key:
-        required: true
-    push:
-      paths:
-        - 'server/**'
-      branches:
-        - main
+  push:
+    paths:
+      - 'server/**'
+    branches:
+      - main
 
 concurrency:
   group: server
