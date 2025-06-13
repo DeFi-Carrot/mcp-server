@@ -27,9 +27,12 @@
     "@carrot-protocol/http-client": "^0.2.76",
     "@coral-xyz/anchor": "^0.29.0",
     "@modelcontextprotocol/sdk": "^1.12.3",
+    "express": "^5.1.0",
+    "winston": "^3.17.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@types/express": "^5.0.3",
     "@types/node": "^20.12.12",
     "prettier": "^3.3.2",
     "ts-node": "^10.9.2",

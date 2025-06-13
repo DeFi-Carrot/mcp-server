@@ -1,0 +1,64 @@
+name: server-base
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+    secrets:
+      aws-access-key-id:
+        required: true
+      aws-secret-access-key:
+        required: true
+
+concurrency:
+  group: server-base
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libusb-1.0-0-dev libudev-dev
+
+      - name: Set up Node.js Api
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: api/package-lock.json
+      
+      - name: Build
+        run: |
+          cd server/
+          make
+      
+      - name: Format Check
+        run: |
+          cd server/
+          make fmt_check
+
+      #- name: Set up Node.js Infra
+      #  uses: actions/setup-node@v4
+      #  with:
+      #    node-version: 22.4.1
+      #    cache: 'npm'
+      #    cache-dependency-path: infra/package-lock.json
+
+      #- name: Deploy
+      #  run: |
+      #    cd infra/
+      #    npm ci
+      #    npx cdk diff --context env=${{ inputs.environment }}
+      #    npx cdk deploy --require-approval never --context env=${{ inputs.environment }}
+      #  env:
+      #    AWS_ACCESS_KEY_ID: ${{ secrets.aws-access-key-id }}
+      #    AWS_SECRET_ACCESS_KEY: ${{ secrets.aws-secret-access-key }}
+      #    AWS_DEFAULT_REGION: 'us-east-2'
