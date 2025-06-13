@@ -87,13 +87,13 @@ export class McpServer extends cdk.Stack {
       }),
     });
 
-    //// Create ECS service
-    //new cdk.aws_ecs.Ec2Service(this, `${id}McpServerService`, {
-    //  cluster,
-    //  taskDefinition,
-    //  desiredCount: 1,
-    //  placementConstraints: [],
-    //});
+    // Create ECS service
+    new cdk.aws_ecs.Ec2Service(this, `${id}McpServerService`, {
+      cluster,
+      taskDefinition,
+      desiredCount: 1,
+      placementConstraints: [],
+    });
 
     // Output the ECR repository URI
     new cdk.CfnOutput(this, "EcrRepositoryUri", {
