@@ -1,4 +1,4 @@
-import express, { NextFunction } from "express";
+import express from "express";
 import { Router } from "./router.js";
 
 export class Api {
