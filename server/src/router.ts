@@ -18,9 +18,6 @@ export class Router {
   }
 
   getIndex = (_req: Request, res: Response) => {
-    logger.info("getIndex start", {
-      version,
-    });
     res.json({
       name: "Carrot MCP",
       version,

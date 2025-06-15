@@ -88,6 +88,11 @@ export class McpServer extends cdk.Stack {
         streamPrefix: logGroupName,
         logGroup,
       }),
+      portMappings: [
+        {
+          containerPort: 8080,
+        },
+      ],
     });
 
     // --- Create a security group for the ECS service ---
@@ -111,11 +116,20 @@ export class McpServer extends cdk.Stack {
       },
     );
 
-    // --- Create a listener for the ALB ---
-    // This listener will handle incoming HTTP traffic on port 80
-    const listener = alb.addListener(`${id}HttpListener`, {
-      port: 80,
-      open: true,
+    // manually created certificate in us-east-2
+    // manually created subdomain in route53
+    const certificate =
+      cdk.aws_certificatemanager.Certificate.fromCertificateArn(
+        this,
+        `${id}Cert`,
+        "arn:aws:acm:us-east-2:058264184558:certificate/ce6189af-c431-4a83-a897-f65903485504",
+      );
+
+    // This listener will handle incoming HTTPS traffic on port 443
+    const httpsListener = alb.addListener(`${id}HttpsListener`, {
+      port: 443,
+      certificates: [certificate], // Attach the certificate
+      protocol: cdk.aws_elasticloadbalancingv2.ApplicationProtocol.HTTPS,
     });
 
     // Create ECS service
@@ -133,15 +147,24 @@ export class McpServer extends cdk.Stack {
       ],
     });
 
-    // --- Add the ECS service as a target for the ALB listener ---
-    listener.addTargets(`${id}EcsTarget`, {
+    // forward 443 to 80
+    httpsListener.addTargets(`${id}EcsTarget`, {
       port: 80,
       targets: [ecsService],
-      // Health check for the containers
       healthCheck: {
         path: "/",
         interval: cdk.Duration.seconds(30),
       },
+    });
+
+    // redirect 80 to 443
+    alb.addListener(`${id}HttpListener`, {
+      port: 80,
+      defaultAction: cdk.aws_elasticloadbalancingv2.ListenerAction.redirect({
+        protocol: "HTTPS",
+        port: "443",
+        permanent: true,
+      }),
     });
 
     // --- Allow traffic from the ALB to the ECS service ---
@@ -156,6 +179,12 @@ export class McpServer extends cdk.Stack {
     // Output the ECR repository URI
     new cdk.CfnOutput(this, "EcrRepositoryUri", {
       value: repository.repositoryUri,
+    });
+
+    // Output the application load balancer DNS name
+    new cdk.CfnOutput(this, "LoadBalancerDns", {
+      value: alb.loadBalancerDnsName,
+      description: "The public DNS name of the Application Load Balancer.",
     });
   }
 }
