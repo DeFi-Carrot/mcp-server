@@ -26,5 +26,5 @@ const loggerConfig = {
 // Create the base logger
 export const logger = winston.createLogger({
   ...loggerConfig,
-  defaultMeta: { service: "mcp-server" },
+  defaultMeta: { service: "carrot-mcp-server" },
 });
