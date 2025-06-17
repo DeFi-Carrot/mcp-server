@@ -20,7 +20,7 @@ export class Api {
     this.app = app;
   }
 
-  async listen(port: number = 8080): Promise<void> {
+  async listen(port: number): Promise<void> {
     logger.info("starting carrot-mcp-server", { port, version });
     this.app.listen(port, () => {});
   }
