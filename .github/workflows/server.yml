@@ -25,6 +25,11 @@ jobs:
           cache: 'npm'
           cache-dependency-path: server/package-lock.json
       
+      - name: Npm Install
+        run: |
+          cd server/
+          npm ci
+      
       - name: Check Formatting
         run: |
           cd server/
