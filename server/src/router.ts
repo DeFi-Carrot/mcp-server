@@ -20,7 +20,7 @@ export class Router {
   };
 
   handleMcpRequest = async (req: Request, res: Response) => {
-    logger.info("handleMcpRequest start", {
+    logger.debug("handleMcpRequest start", {
       version,
     });
 
@@ -36,7 +36,7 @@ export class Router {
     // return the response from the mcp server
     await transport.handleRequest(req, res, req.body);
 
-    logger.info("handleMcpRequest end", {
+    logger.debug("handleMcpRequest end", {
       version,
     });
   };

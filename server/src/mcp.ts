@@ -4,6 +4,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { CrtClient } from "./crt.js";
 import { USDC_MINT } from "./config.js";
 import { z } from "zod";
+import { logger } from "./utils.js";
 const { version } = packageJson;
 
 export class CarrotMcpServer {
@@ -33,6 +34,7 @@ export class CarrotMcpServer {
   // called on incoming connections
   async initialize(transport: StreamableHTTPServerTransport) {
     this.server.connect(transport);
+    logger.debug(`mcp server connected`);
   }
 
   registerTools() {
@@ -48,6 +50,7 @@ export class CarrotMcpServer {
       async () => {
         try {
           const apyString = await this.crtClient.getCrtApy();
+          logger.info(`crt apy fetched`, { apy: apyString });
           return {
             content: [{ type: "text", text: apyString }],
           };
@@ -79,6 +82,7 @@ export class CarrotMcpServer {
       async ({ signedTx }) => {
         try {
           const txSig = await this.crtClient.sendTx(signedTx);
+          logger.info(`tx sent`, { txSig });
           return {
             content: [
               {
@@ -88,6 +92,7 @@ export class CarrotMcpServer {
             ],
           };
         } catch (e) {
+          logger.error(`error sending tx`, { error: e });
           return {
             content: [{ type: "text", text: `Error sending tx: ${e}` }],
             isError: true,
@@ -117,11 +122,17 @@ export class CarrotMcpServer {
       },
       async ({ uiAmount, walletStr }) => {
         try {
+          const mint = USDC_MINT.toString();
           const unsignedTx = await this.crtClient.getUnsignedIssueTx(
             uiAmount,
-            USDC_MINT.toString(),
+            mint,
             walletStr,
           );
+          logger.info(`mint tx created`, {
+            uiAmount,
+            wallet: walletStr,
+            inputMint: mint,
+          });
           return {
             content: [
               {
@@ -131,6 +142,7 @@ export class CarrotMcpServer {
             ],
           };
         } catch (e) {
+          logger.error(`error creating mint tx`, { error: e });
           return {
             content: [
               {
@@ -171,6 +183,11 @@ export class CarrotMcpServer {
             USDC_MINT.toString(),
             walletStr,
           );
+          logger.info(`burn tx created`, {
+            uiAmount,
+            wallet: walletStr,
+            outputMint: USDC_MINT.toString(),
+          });
           return {
             content: [
               {
@@ -180,6 +197,7 @@ export class CarrotMcpServer {
             ],
           };
         } catch (e) {
+          logger.error(`error creating burn tx`, { error: e });
           return {
             content: [
               {
