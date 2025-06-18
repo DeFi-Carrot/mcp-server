@@ -143,5 +143,54 @@ export class CarrotMcpServer {
         }
       },
     );
+
+    // burn crt
+    this.server.tool(
+      "burn_crt",
+      "Burns the Carrot Protocol token (CRT) in exchange for USDC",
+      {
+        uiAmount: z.number().describe("The amount of CRT to use to burn"),
+        walletStr: z
+          .string()
+          .describe(
+            "The wallet address to use to burn CRT, this must be the signer and this is the destination address for the USDC",
+          ),
+      },
+      {
+        title: "Burn CRT",
+        description:
+          "Burns the Carrot Protocol token (CRT) in exchange for USDC",
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+      },
+      async ({ uiAmount, walletStr }) => {
+        try {
+          const unsignedTx = await this.crtClient.getUnsignedRedeemTx(
+            uiAmount,
+            USDC_MINT.toString(),
+            walletStr,
+          );
+          return {
+            content: [
+              {
+                type: "text",
+                text: `sign this tx: ${unsignedTx} with ${walletStr} and send it back here using the send_tx tool`,
+              },
+            ],
+          };
+        } catch (e) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error creating unsigned tx for burning CRT: ${e}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      },
+    );
   }
 }

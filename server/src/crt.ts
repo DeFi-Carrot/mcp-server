@@ -30,8 +30,10 @@ export class CrtClient {
     return apyFmt;
   }
 
-  async sendTx(signedTx: string): Promise<string> {
-    return signedTx;
+  // sends a signed tx to the Carrot API for tx land on solana
+  async sendTx(signedBase64Tx: string): Promise<string> {
+    const txSig = await this.carrotClient.sendSignedTx(signedBase64Tx);
+    return txSig;
   }
 
   async getUnsignedIssueTx(
@@ -48,13 +50,14 @@ export class CrtClient {
     const assetMint = new web3.PublicKey(assetMintStr);
     const wallet = new web3.PublicKey(walletStr);
 
-    const unsignedTx = await this.carrotClient.issue(
+    const response = await this.carrotClient.prepareIssue(
       CRT_VAULT_ADDRESS,
       assetMint,
       amount,
+      wallet,
     );
 
-    return unsignedTx;
+    return response.tx;
   }
 
   async getUnsignedRedeemTx(
@@ -71,12 +74,13 @@ export class CrtClient {
     const assetMint = new web3.PublicKey(assetMintStr);
     const wallet = new web3.PublicKey(walletStr);
 
-    const unsignedTx = await this.carrotClient.redeem(
+    const response = await this.carrotClient.prepareRedeem(
       CRT_VAULT_ADDRESS,
       assetMint,
       amount,
+      wallet,
     );
 
-    return unsignedTx;
+    return response.tx;
   }
 }

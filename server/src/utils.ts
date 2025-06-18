@@ -1,7 +1,4 @@
-import { Client as CarrotHttpClient } from "@carrot-protocol/http-client";
-import { CARROT_API_URL } from "./config.js";
 import winston from "winston";
-import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 
 // Base logger configuration
 const loggerConfig = {
