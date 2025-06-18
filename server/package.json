@@ -27,7 +27,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@carrot-protocol/http-client": "^0.2.76",
+    "@carrot-protocol/http-client": "0.2.78-drift-apy-fix-dev-9ad3029",
     "@coral-xyz/anchor": "^0.29.0",
     "@modelcontextprotocol/sdk": "^1.12.3",
     "express": "^5.1.0",

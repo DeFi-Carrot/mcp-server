@@ -1,16 +1,15 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { logger } from "./utils.js";
 import { Request, Response } from "express";
-import { createMcpServer } from "./mcp.js";
+import { CarrotMcpServer } from "./mcp.js";
 import packageJson from "../package.json" with { type: "json" };
 const { version } = packageJson;
 
 export class Router {
-  private mcpServer: McpServer;
+  private mcpServer: CarrotMcpServer;
 
   constructor() {
-    this.mcpServer = createMcpServer();
+    this.mcpServer = new CarrotMcpServer();
   }
 
   getIndex = (_req: Request, res: Response) => {
@@ -21,7 +20,7 @@ export class Router {
   };
 
   handleMcpRequest = async (req: Request, res: Response) => {
-    logger.info("handleMcpRequest start", {
+    logger.debug("handleMcpRequest start", {
       version,
     });
 
@@ -32,12 +31,12 @@ export class Router {
     });
 
     // connect the transport to the mcp server
-    await this.mcpServer.connect(transport);
+    await this.mcpServer.initialize(transport);
 
     // return the response from the mcp server
     await transport.handleRequest(req, res, req.body);
 
-    logger.info("handleMcpRequest end", {
+    logger.debug("handleMcpRequest end", {
       version,
     });
   };
