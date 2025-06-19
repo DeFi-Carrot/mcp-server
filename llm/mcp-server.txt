@@ -36,7 +36,6 @@ Directory structure:
     │   │   ├── index.js
     │   │   ├── mcp.js
     │   │   ├── router.js
-    │   │   ├── sessionStore.js
     │   │   └── utils.js
     │   ├── node_modules/
     │   └── src/
@@ -121,7 +120,7 @@ build:
 clean:
 	npm run clean
 
-start:
+start: build
 	npm run start
 
 fmt:
@@ -137,6 +136,8 @@ File: client/.gitignore
 ================================================
 node_modules/
 build/
+user1.json
+
 
 
 
@@ -154,9 +155,9 @@ import { CarrotMcpClient } from "./mcp.js";
 async function main() {
     const modelApiKey = "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";
     const mcpServerUrl = "http://localhost:8080/mcp";
-    const client = new CarrotMcpClient(modelApiKey, mcpServerUrl);
+    const client = new CarrotMcpClient(modelApiKey, mcpServerUrl, "user1.json");
     await client.connectToMcpServer();
-    const response = await client.processQuery("give me current apy for crt");
+    const response = await client.processQuery("mint 1000 usdc worth of crt using wallet MxTeykfpirP5wGbTvbuDcDLNv7QGtMYadYL5Y11pdZh");
     console.log(response);
 }
 main();
@@ -172,18 +173,49 @@ import packageJson from "../package.json" with { type: "json" };
 import { logger } from "./utils.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { MODEL_NAME } from "./config.js";
+import { web3 } from "@coral-xyz/anchor";
+import { ElicitRequestSchema, } from "@modelcontextprotocol/sdk/types.js";
+import fs from "fs";
 const { version } = packageJson;
 export class CarrotMcpClient {
     mcpClient;
     mcpServerUrl;
     modelClient;
     tools = [];
-    constructor(modelApiKey, mcpServerUrl) {
+    signer;
+    constructor(modelApiKey, mcpServerUrl, signerKeypairPath) {
+        this.signer = getSigner(signerKeypairPath);
         this.modelClient = new Anthropic({
             apiKey: modelApiKey,
         });
-        this.mcpClient = new McpClient({ name: "carrot-mcp-client", version });
+        this.mcpClient = new McpClient({
+            name: "carrot-mcp-client",
+            version,
+            instructions: `You MUST use the following address for the 'walletStr' parameter: ${this.signer.publicKey.toString()} when a tool requires it.`,
+        }, {
+            capabilities: {
+                elicitation: {},
+            },
+        });
         this.mcpServerUrl = new URL(mcpServerUrl);
+        // handler dispatching
+        this.mcpClient.setRequestHandler(ElicitRequestSchema, async (request) => {
+            const { requestedSchema } = request.params;
+            // --- Dispatcher Logic ---
+            // Check the schema to identify the type of request.
+            // 1. Is this a request for a transaction signature?
+            // We check if the schema is asking for a `signedTx` property.
+            if (requestedSchema.properties?.signedTx) {
+                return this.handleSigningRequest(request);
+            }
+            // --- Fallback for unknown requests ---
+            logger.warn("Received an unsupported elicitation request", {
+                schema: requestedSchema,
+            });
+            return {
+                action: "decline",
+            };
+        });
     }
     async connectToMcpServer() {
         logger.info("Connecting to MCP server", { url: this.mcpServerUrl });
@@ -210,42 +242,109 @@ export class CarrotMcpClient {
                 content: query,
             },
         ];
-        const response = await this.modelClient.messages.create({
+        logger.info("Processing query with Claude", { query });
+        // === LLM Turn 1: Decide which tool to use ===
+        const initialResponse = await this.modelClient.messages.create({
             model: MODEL_NAME,
             max_tokens: 100,
             messages,
             tools: this.tools,
         });
-        const finalText = [];
-        for (const content of response.content) {
-            if (content.type === "text") {
-                logger.info("model returned text only response");
-                finalText.push(content.text);
+        // Append the assistant's response (including the tool_use request) to the message history
+        messages.push({
+            role: "assistant",
+            content: initialResponse.content,
+        });
+        // Check if the model wants to use a tool
+        const toolUseContent = initialResponse.content.find((content) => content.type === "tool_use");
+        if (toolUseContent && toolUseContent.type === "tool_use") {
+            logger.info("Claude requested a tool call", {
+                toolName: toolUseContent.name,
+                toolUseContent,
+            });
+            // === Your Code's Turn: Execute the tool ===
+            const toolResult = await this.mcpClient.callTool({
+                name: toolUseContent.name,
+                args: toolUseContent.input,
+            });
+            // Extract the text from the tool result
+            const toolOutputText = toolResult.content?.[0]?.text;
+            if (toolOutputText === undefined) {
+                throw new Error("Tool call did not return text content.");
             }
-            else if (content.type === "tool_use") {
-                const toolName = content.name;
-                const toolArgs = content.input;
-                // call mcp tool
-                const result = await this.mcpClient.callTool({
-                    name: toolName,
-                    arguments: toolArgs,
-                });
-                finalText.push(`[Calling tool ${toolName} with args ${JSON.stringify(toolArgs)}]`);
-                logger.info("Calling tool", { toolName, toolArgs });
-                messages.push({
-                    role: "user",
-                    content: result.content,
-                });
-                const response = await this.modelClient.messages.create({
-                    model: MODEL_NAME,
-                    max_tokens: 1000,
-                    messages,
-                });
-                finalText.push(response.content[0].type === "text" ? response.content[0].text : "");
-            }
+            logger.info("Tool executed successfully", { result: toolOutputText });
+            // === LLM Turn 2: Send the tool result back to the model ===
+            messages.push({
+                role: "user",
+                content: [
+                    {
+                        type: "tool_result",
+                        tool_use_id: toolUseContent.id,
+                        content: toolOutputText, // Pass the extracted text string here
+                    },
+                ],
+            });
+            // Get the final response from the model
+            const finalResponse = await this.modelClient.messages.create({
+                model: MODEL_NAME,
+                max_tokens: 100,
+                messages, // Send the full conversation history
+                tools: this.tools,
+            });
+            // Assuming the final response is text
+            return finalResponse.content[0].type === "text"
+                ? finalResponse.content[0].text
+                : "The model did not return a text response.";
         }
-        return finalText.join("\n");
+        else if (initialResponse.content[0].type === "text") {
+            // If no tool was used, just return the initial text response
+            logger.info("Claude responded directly without using a tool.");
+            return initialResponse.content[0].text;
+        }
+        return "An unexpected response format was received from the model.";
     }
+    /**
+     * Signs a base64 encoded transaction.
+     *
+     * @param unsignedTx - The base64 encoded unsigned transaction from the server.
+     * @returns A base64 encoded signed transaction string.
+     */
+    signTx(unsignedTx) {
+        const tx = web3.Transaction.from(Buffer.from(unsignedTx, "base64"));
+        tx.sign(this.signer);
+        const signedTx = tx.serialize();
+        return Buffer.from(signedTx).toString("base64");
+    }
+    async handleSigningRequest(request) {
+        const { message, prefilled } = request.params;
+        logger.info(`Handling signing request`, { message });
+        const unsignedTx = prefilled.unsignedTx;
+        if (!unsignedTx) {
+            const errMsg = "Signing request did not provide an unsigned transaction.";
+            logger.error(errMsg);
+            return { action: "reject" };
+        }
+        try {
+            const signedTx = this.signTx(unsignedTx);
+            logger.info("Transaction signed successfully for request.", { message });
+            return {
+                action: "accept",
+                content: {
+                    signedTx: signedTx,
+                },
+            };
+        }
+        catch (e) {
+            logger.error("Failed to sign transaction", { error: e });
+            return {
+                action: "reject",
+            };
+        }
+    }
+}
+function getSigner(signerKeypairPath) {
+    const keypair = web3.Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(signerKeypairPath, "utf8"))));
+    return keypair;
 }
 
 
@@ -267,7 +366,7 @@ const loggerConfig = {
 // Create the base logger
 export const logger = winston.createLogger({
     ...loggerConfig,
-    defaultMeta: { service: "carrot-mcp-server" },
+    defaultMeta: { service: "carrot-mcp-client" },
 });
 
 
@@ -290,11 +389,13 @@ async function main() {
     "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";
   const mcpServerUrl = "http://localhost:8080/mcp";
 
-  const client = new CarrotMcpClient(modelApiKey, mcpServerUrl);
+  const client = new CarrotMcpClient(modelApiKey, mcpServerUrl, "user1.json");
 
   await client.connectToMcpServer();
 
-  const response = await client.processQuery("give me current apy for crt");
+  const response = await client.processQuery(
+    "mint 1000 usdc worth of crt using wallet MxTeykfpirP5wGbTvbuDcDLNv7QGtMYadYL5Y11pdZh",
+  );
   console.log(response);
 }
 
@@ -315,6 +416,14 @@ import packageJson from "../package.json" with { type: "json" };
 import { logger } from "./utils.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { MODEL_NAME } from "./config.js";
+import { web3 } from "@coral-xyz/anchor";
+import {
+  ElicitRequest,
+  ElicitRequestSchema,
+  ElicitResult,
+} from "@modelcontextprotocol/sdk/types.js";
+import fs from "fs";
+
 const { version } = packageJson;
 
 export class CarrotMcpClient {
@@ -322,13 +431,51 @@ export class CarrotMcpClient {
   private mcpServerUrl: URL;
   private modelClient: Anthropic;
   private tools: Tool[] = [];
+  private signer: web3.Keypair;
 
-  constructor(modelApiKey: string, mcpServerUrl: string) {
+  constructor(
+    modelApiKey: string,
+    mcpServerUrl: string,
+    signerKeypairPath: string,
+  ) {
+    this.signer = getSigner(signerKeypairPath);
     this.modelClient = new Anthropic({
       apiKey: modelApiKey,
     });
-    this.mcpClient = new McpClient({ name: "carrot-mcp-client", version });
+    this.mcpClient = new McpClient(
+      {
+        name: "carrot-mcp-client",
+        version,
+      },
+      {
+        capabilities: {
+          elicitation: {},
+        },
+      },
+    );
     this.mcpServerUrl = new URL(mcpServerUrl);
+
+    // handler dispatching
+    this.mcpClient.setRequestHandler(ElicitRequestSchema, async (request) => {
+      const { requestedSchema } = request.params;
+
+      // --- Dispatcher Logic ---
+      // Check the schema to identify the type of request.
+
+      // 1. Is this a request for a transaction signature?
+      // We check if the schema is asking for a `signedTx` property.
+      if (requestedSchema.properties?.signedTx) {
+        return this.handleSigningRequest(request);
+      }
+
+      // --- Fallback for unknown requests ---
+      logger.warn("Received an unsupported elicitation request", {
+        schema: requestedSchema,
+      });
+      return {
+        action: "decline",
+      };
+    });
   }
 
   async connectToMcpServer() {
@@ -361,52 +508,134 @@ export class CarrotMcpClient {
       },
     ];
 
-    const response = await this.modelClient.messages.create({
+    logger.info("Processing query with Claude", { query });
+
+    // === LLM Turn 1: Decide which tool to use ===
+    const initialResponse = await this.modelClient.messages.create({
       model: MODEL_NAME,
       max_tokens: 100,
       messages,
       tools: this.tools,
     });
 
-    const finalText: string[] = [];
+    // Append the assistant's response (including the tool_use request) to the message history
+    messages.push({
+      role: "assistant",
+      content: initialResponse.content,
+    });
 
-    for (const content of response.content) {
-      if (content.type === "text") {
-        logger.info("model returned text only response");
-        finalText.push(content.text);
-      } else if (content.type === "tool_use") {
-        const toolName = content.name;
-        const toolArgs = content.input as { [x: string]: unknown } | undefined;
+    // Check if the model wants to use a tool
+    const toolUseContent = initialResponse.content.find(
+      (content) => content.type === "tool_use",
+    );
 
-        // call mcp tool
-        const result = await this.mcpClient.callTool({
-          name: toolName,
-          arguments: toolArgs,
-        });
-        finalText.push(
-          `[Calling tool ${toolName} with args ${JSON.stringify(toolArgs)}]`,
-        );
-        logger.info("Calling tool", { toolName, toolArgs });
+    if (toolUseContent && toolUseContent.type === "tool_use") {
+      logger.info("Claude requested a tool call", {
+        toolName: toolUseContent.name,
+        toolUseContent,
+      });
 
-        messages.push({
-          role: "user",
-          content: result.content as string,
-        });
+      // === Your Code's Turn: Execute the tool ===
+      const toolResult = await this.mcpClient.callTool({
+        name: toolUseContent.name,
+        args: toolUseContent.input,
+      });
 
-        const response = await this.modelClient.messages.create({
-          model: MODEL_NAME,
-          max_tokens: 1000,
-          messages,
-        });
-
-        finalText.push(
-          response.content[0].type === "text" ? response.content[0].text : "",
-        );
+      // Extract the text from the tool result
+      const toolOutputText = (
+        toolResult.content as { text?: string }[] | undefined
+      )?.[0]?.text;
+      if (toolOutputText === undefined) {
+        throw new Error("Tool call did not return text content.");
       }
+
+      logger.info("Tool executed successfully", { result: toolOutputText });
+
+      // === LLM Turn 2: Send the tool result back to the model ===
+      messages.push({
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: toolUseContent.id,
+            content: toolOutputText, // Pass the extracted text string here
+          },
+        ],
+      });
+
+      // Get the final response from the model
+      const finalResponse = await this.modelClient.messages.create({
+        model: MODEL_NAME,
+        max_tokens: 100,
+        messages, // Send the full conversation history
+        tools: this.tools,
+      });
+
+      // Assuming the final response is text
+      return finalResponse.content[0].type === "text"
+        ? finalResponse.content[0].text
+        : "The model did not return a text response.";
+    } else if (initialResponse.content[0].type === "text") {
+      // If no tool was used, just return the initial text response
+      logger.info("Claude responded directly without using a tool.");
+      return initialResponse.content[0].text;
     }
 
-    return finalText.join("\n");
+    return "An unexpected response format was received from the model.";
   }
+
+  /**
+   * Signs a base64 encoded transaction.
+   *
+   * @param unsignedTx - The base64 encoded unsigned transaction from the server.
+   * @returns A base64 encoded signed transaction string.
+   */
+  private signTx(unsignedTx: string): string {
+    const tx = web3.Transaction.from(Buffer.from(unsignedTx, "base64"));
+    tx.sign(this.signer);
+
+    const signedTx = tx.serialize();
+
+    return Buffer.from(signedTx).toString("base64");
+  }
+
+  private async handleSigningRequest(
+    request: ElicitRequest,
+  ): Promise<ElicitResult> {
+    const { message, prefilled } = request.params;
+    logger.info(`Handling signing request`, { message });
+
+    const unsignedTx = (prefilled as any).unsignedTx as string;
+    if (!unsignedTx) {
+      const errMsg = "Signing request did not provide an unsigned transaction.";
+      logger.error(errMsg);
+      return { action: "reject" };
+    }
+
+    try {
+      const signedTx = this.signTx(unsignedTx);
+      logger.info("Transaction signed successfully for request.", { message });
+
+      return {
+        action: "accept",
+        content: {
+          signedTx: signedTx,
+        },
+      };
+    } catch (e) {
+      logger.error("Failed to sign transaction", { error: e });
+      return {
+        action: "reject",
+      };
+    }
+  }
+}
+
+function getSigner(signerKeypairPath: string): web3.Keypair {
+  const keypair = web3.Keypair.fromSecretKey(
+    Uint8Array.from(JSON.parse(fs.readFileSync(signerKeypairPath, "utf8"))),
+  );
+  return keypair;
 }
 
 
@@ -436,7 +665,7 @@ const loggerConfig = {
 // Create the base logger
 export const logger = winston.createLogger({
   ...loggerConfig,
-  defaultMeta: { service: "carrot-mcp-server" },
+  defaultMeta: { service: "carrot-mcp-client" },
 });
 
 
@@ -744,7 +973,7 @@ push:
 	npm run docker:tag
 	npm run docker:push
 
-start:
+start: build
 	npm run start
 
 start_docker:
@@ -896,6 +1125,7 @@ export class CarrotMcpServer {
             version,
             capabilities: {
                 tools: {},
+                elicitation: {},
             },
             instructions: "This server provides tools to interact with Carrot Protocol",
         });
@@ -931,38 +1161,6 @@ export class CarrotMcpServer {
                 };
             }
         });
-        // send tx
-        this.server.tool("send_tx", "Sends a transaction to the network", {
-            signedTx: z
-                .string()
-                .describe("The signed transaction to send to the network"),
-        }, {
-            title: "Send Transaction",
-            description: "Sends a transaction to the network",
-            readOnlyHint: false,
-            destructiveHint: false,
-            idempotentHint: false,
-        }, async ({ signedTx }) => {
-            try {
-                const txSig = await this.crtClient.sendTx(signedTx);
-                logger.info(`tx sent`, { txSig });
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: `tx sent successfully, here's the transaction signature: ${txSig}`,
-                        },
-                    ],
-                };
-            }
-            catch (e) {
-                logger.error(`error sending tx`, { error: e });
-                return {
-                    content: [{ type: "text", text: `Error sending tx: ${e}` }],
-                    isError: true,
-                };
-            }
-        });
         // mint crt
         this.server.tool("mint_crt", "Mints the Carrot Protocol token (CRT)", {
             uiAmount: z.number().describe("The amount of USDC to use to mint CRT"),
@@ -975,7 +1173,7 @@ export class CarrotMcpServer {
             readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: false,
-        }, async ({ uiAmount, walletStr }) => {
+        }, async ({ uiAmount, walletStr }, { sendRequest }) => {
             try {
                 const mint = USDC_MINT.toString();
                 const unsignedTx = await this.crtClient.getUnsignedIssueTx(uiAmount, mint, walletStr);
@@ -984,11 +1182,39 @@ export class CarrotMcpServer {
                     wallet: walletStr,
                     inputMint: mint,
                 });
+                const elicitationResult = await sendRequest({
+                    method: "elicitation/create",
+                    params: {
+                        message: `Please sign the transaction to mint ${uiAmount} CRT.`,
+                        requestedSchema: {
+                            type: "object",
+                            properties: {
+                                unsignedTx: { type: "string" },
+                                signedTx: { type: "string" },
+                            },
+                            required: ["signedTx"],
+                        },
+                        prefilled: {
+                            unsignedTx,
+                        },
+                    },
+                }, 
+                // Define the expected response schema from the client
+                z.object({
+                    action: z.literal("accept"),
+                    content: z.object({
+                        signedTx: z.string(),
+                    }),
+                }));
+                // 2. Client returned the signed transaction, now send it.
+                logger.info(`Received signed transaction, sending to network...`);
+                const txSig = await this.crtClient.sendTx(elicitationResult.content.signedTx);
+                logger.info(`tx sent`, { txSig });
                 return {
                     content: [
                         {
                             type: "text",
-                            text: `sign this tx: ${unsignedTx} with ${walletStr} and send it back here using the send_tx tool`,
+                            text: `Transaction to mint ${uiAmount} CRT was successful! Signature: ${txSig}`,
                         },
                     ],
                 };
@@ -1018,7 +1244,7 @@ export class CarrotMcpServer {
             readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: false,
-        }, async ({ uiAmount, walletStr }) => {
+        }, async ({ uiAmount, walletStr }, { sendRequest }) => {
             try {
                 const unsignedTx = await this.crtClient.getUnsignedRedeemTx(uiAmount, USDC_MINT.toString(), walletStr);
                 logger.info(`burn tx created`, {
@@ -1026,11 +1252,39 @@ export class CarrotMcpServer {
                     wallet: walletStr,
                     outputMint: USDC_MINT.toString(),
                 });
+                const elicitationResult = await sendRequest({
+                    method: "elicitation/create",
+                    params: {
+                        message: `Please sign the transaction to mint ${uiAmount} CRT.`,
+                        requestedSchema: {
+                            type: "object",
+                            properties: {
+                                unsignedTx: { type: "string" },
+                                signedTx: { type: "string" },
+                            },
+                            required: ["signedTx"],
+                        },
+                        prefilled: {
+                            unsignedTx,
+                        },
+                    },
+                }, 
+                // Define the expected response schema from the client
+                z.object({
+                    action: z.literal("accept"),
+                    content: z.object({
+                        signedTx: z.string(),
+                    }),
+                }));
+                // 2. Client returned the signed transaction, now send it.
+                logger.info(`Received signed transaction, sending to network...`);
+                const txSig = await this.crtClient.sendTx(elicitationResult.content.signedTx);
+                logger.info(`tx sent`, { txSig });
                 return {
                     content: [
                         {
                             type: "text",
-                            text: `sign this tx: ${unsignedTx} with ${walletStr} and send it back here using the send_tx tool`,
+                            text: `Transaction to burn ${uiAmount} CRT was successful! Signature: ${txSig}`,
                         },
                     ],
                 };
@@ -1089,18 +1343,6 @@ export class Router {
             version,
         });
     };
-}
-
-
-
-================================================
-File: server/build/sessionStore.js
-================================================
-/**
- * Abstract base class for session storage.
- * This allows for different storage backends (e.g., in-memory, DynamoDB).
- */
-export class SessionStore {
 }
 
 
@@ -1316,6 +1558,7 @@ export class CarrotMcpServer {
       version,
       capabilities: {
         tools: {},
+        elicitation: {},
       },
       instructions:
         "This server provides tools to interact with Carrot Protocol",
@@ -1361,44 +1604,6 @@ export class CarrotMcpServer {
       },
     );
 
-    // send tx
-    this.server.tool(
-      "send_tx",
-      "Sends a transaction to the network",
-      {
-        signedTx: z
-          .string()
-          .describe("The signed transaction to send to the network"),
-      },
-      {
-        title: "Send Transaction",
-        description: "Sends a transaction to the network",
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-      },
-      async ({ signedTx }) => {
-        try {
-          const txSig = await this.crtClient.sendTx(signedTx);
-          logger.info(`tx sent`, { txSig });
-          return {
-            content: [
-              {
-                type: "text",
-                text: `tx sent successfully, here's the transaction signature: ${txSig}`,
-              },
-            ],
-          };
-        } catch (e) {
-          logger.error(`error sending tx`, { error: e });
-          return {
-            content: [{ type: "text", text: `Error sending tx: ${e}` }],
-            isError: true,
-          };
-        }
-      },
-    );
-
     // mint crt
     this.server.tool(
       "mint_crt",
@@ -1418,7 +1623,7 @@ export class CarrotMcpServer {
         destructiveHint: false,
         idempotentHint: false,
       },
-      async ({ uiAmount, walletStr }) => {
+      async ({ uiAmount, walletStr }, { sendRequest }) => {
         try {
           const mint = USDC_MINT.toString();
           const unsignedTx = await this.crtClient.getUnsignedIssueTx(
@@ -1431,11 +1636,45 @@ export class CarrotMcpServer {
             wallet: walletStr,
             inputMint: mint,
           });
+
+          const elicitationResult = await sendRequest(
+            {
+              method: "elicitation/create",
+              params: {
+                message: `Please sign the transaction to mint ${uiAmount} CRT.`,
+                requestedSchema: {
+                  type: "object",
+                  properties: {
+                    unsignedTx: { type: "string" },
+                    signedTx: { type: "string" },
+                  },
+                  required: ["signedTx"],
+                },
+                prefilled: {
+                  unsignedTx,
+                },
+              },
+            },
+            // Define the expected response schema from the client
+            z.object({
+              action: z.literal("accept"),
+              content: z.object({
+                signedTx: z.string(),
+              }),
+            }),
+          );
+
+          // 2. Client returned the signed transaction, now send it.
+          logger.info(`Received signed transaction, sending to network...`);
+          const txSig = await this.crtClient.sendTx(
+            elicitationResult.content.signedTx,
+          );
+          logger.info(`tx sent`, { txSig });
           return {
             content: [
               {
                 type: "text",
-                text: `sign this tx: ${unsignedTx} with ${walletStr} and send it back here using the send_tx tool`,
+                text: `Transaction to mint ${uiAmount} CRT was successful! Signature: ${txSig}`,
               },
             ],
           };
@@ -1474,7 +1713,7 @@ export class CarrotMcpServer {
         destructiveHint: false,
         idempotentHint: false,
       },
-      async ({ uiAmount, walletStr }) => {
+      async ({ uiAmount, walletStr }, { sendRequest }) => {
         try {
           const unsignedTx = await this.crtClient.getUnsignedRedeemTx(
             uiAmount,
@@ -1486,11 +1725,46 @@ export class CarrotMcpServer {
             wallet: walletStr,
             outputMint: USDC_MINT.toString(),
           });
+
+          const elicitationResult = await sendRequest(
+            {
+              method: "elicitation/create",
+              params: {
+                message: `Please sign the transaction to mint ${uiAmount} CRT.`,
+                requestedSchema: {
+                  type: "object",
+                  properties: {
+                    unsignedTx: { type: "string" },
+                    signedTx: { type: "string" },
+                  },
+                  required: ["signedTx"],
+                },
+                prefilled: {
+                  unsignedTx,
+                },
+              },
+            },
+            // Define the expected response schema from the client
+            z.object({
+              action: z.literal("accept"),
+              content: z.object({
+                signedTx: z.string(),
+              }),
+            }),
+          );
+
+          // 2. Client returned the signed transaction, now send it.
+          logger.info(`Received signed transaction, sending to network...`);
+          const txSig = await this.crtClient.sendTx(
+            elicitationResult.content.signedTx,
+          );
+
+          logger.info(`tx sent`, { txSig });
           return {
             content: [
               {
                 type: "text",
-                text: `sign this tx: ${unsignedTx} with ${walletStr} and send it back here using the send_tx tool`,
+                text: `Transaction to burn ${uiAmount} CRT was successful! Signature: ${txSig}`,
               },
             ],
           };

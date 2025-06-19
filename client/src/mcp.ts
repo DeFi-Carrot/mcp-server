@@ -8,6 +8,14 @@ import packageJson from "../package.json" with { type: "json" };
 import { logger } from "./utils.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { MODEL_NAME } from "./config.js";
+import { web3 } from "@coral-xyz/anchor";
+import {
+  ElicitRequest,
+  ElicitRequestSchema,
+  ElicitResult,
+} from "@modelcontextprotocol/sdk/types.js";
+import fs from "fs";
+
 const { version } = packageJson;
 
 export class CarrotMcpClient {
@@ -15,13 +23,51 @@ export class CarrotMcpClient {
   private mcpServerUrl: URL;
   private modelClient: Anthropic;
   private tools: Tool[] = [];
+  private signer: web3.Keypair;
 
-  constructor(modelApiKey: string, mcpServerUrl: string) {
+  constructor(
+    modelApiKey: string,
+    mcpServerUrl: string,
+    signerKeypairPath: string,
+  ) {
+    this.signer = getSigner(signerKeypairPath);
     this.modelClient = new Anthropic({
       apiKey: modelApiKey,
     });
-    this.mcpClient = new McpClient({ name: "carrot-mcp-client", version });
+    this.mcpClient = new McpClient(
+      {
+        name: "carrot-mcp-client",
+        version,
+      },
+      {
+        capabilities: {
+          elicitation: {},
+        },
+      },
+    );
     this.mcpServerUrl = new URL(mcpServerUrl);
+
+    // handler dispatching
+    this.mcpClient.setRequestHandler(ElicitRequestSchema, async (request) => {
+      const { requestedSchema } = request.params;
+
+      // --- Dispatcher Logic ---
+      // Check the schema to identify the type of request.
+
+      // 1. Is this a request for a transaction signature?
+      // We check if the schema is asking for a `signedTx` property.
+      if (requestedSchema.properties?.signedTx) {
+        return this.handleSigningRequest(request);
+      }
+
+      // --- Fallback for unknown requests ---
+      logger.warn("Received an unsupported elicitation request", {
+        schema: requestedSchema,
+      });
+      return {
+        action: "decline",
+      };
+    });
   }
 
   async connectToMcpServer() {
@@ -59,7 +105,7 @@ export class CarrotMcpClient {
     // === LLM Turn 1: Decide which tool to use ===
     const initialResponse = await this.modelClient.messages.create({
       model: MODEL_NAME,
-      max_tokens: 1000, // Increased from 100 for more robust tool use reasoning
+      max_tokens: 100,
       messages,
       tools: this.tools,
     });
@@ -78,6 +124,7 @@ export class CarrotMcpClient {
     if (toolUseContent && toolUseContent.type === "tool_use") {
       logger.info("Claude requested a tool call", {
         toolName: toolUseContent.name,
+        toolUseContent,
       });
 
       // === Your Code's Turn: Execute the tool ===
@@ -111,7 +158,7 @@ export class CarrotMcpClient {
       // Get the final response from the model
       const finalResponse = await this.modelClient.messages.create({
         model: MODEL_NAME,
-        max_tokens: 1000,
+        max_tokens: 100,
         messages, // Send the full conversation history
         tools: this.tools,
       });
@@ -128,4 +175,57 @@ export class CarrotMcpClient {
 
     return "An unexpected response format was received from the model.";
   }
+
+  /**
+   * Signs a base64 encoded transaction.
+   *
+   * @param unsignedTx - The base64 encoded unsigned transaction from the server.
+   * @returns A base64 encoded signed transaction string.
+   */
+  private signTx(unsignedTx: string): string {
+    const tx = web3.Transaction.from(Buffer.from(unsignedTx, "base64"));
+    tx.sign(this.signer);
+
+    const signedTx = tx.serialize();
+
+    return Buffer.from(signedTx).toString("base64");
+  }
+
+  private async handleSigningRequest(
+    request: ElicitRequest,
+  ): Promise<ElicitResult> {
+    const { message, prefilled } = request.params;
+    logger.info(`Handling signing request`, { message });
+
+    const unsignedTx = (prefilled as any).unsignedTx as string;
+    if (!unsignedTx) {
+      const errMsg = "Signing request did not provide an unsigned transaction.";
+      logger.error(errMsg);
+      return { action: "reject" };
+    }
+
+    try {
+      const signedTx = this.signTx(unsignedTx);
+      logger.info("Transaction signed successfully for request.", { message });
+
+      return {
+        action: "accept",
+        content: {
+          signedTx: signedTx,
+        },
+      };
+    } catch (e) {
+      logger.error("Failed to sign transaction", { error: e });
+      return {
+        action: "reject",
+      };
+    }
+  }
+}
+
+function getSigner(signerKeypairPath: string): web3.Keypair {
+  const keypair = web3.Keypair.fromSecretKey(
+    Uint8Array.from(JSON.parse(fs.readFileSync(signerKeypairPath, "utf8"))),
+  );
+  return keypair;
 }
