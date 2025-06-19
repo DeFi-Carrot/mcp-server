@@ -1,10 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import packageJson from "../package.json" with { type: "json" };
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CrtClient } from "./crt.js";
 import { USDC_MINT } from "./config.js";
 import { z } from "zod";
 import { logger } from "./utils.js";
+import packageJson from "../package.json" with { type: "json" };
 const { version } = packageJson;
 
 export class CarrotMcpServer {
@@ -18,6 +18,7 @@ export class CarrotMcpServer {
       version,
       capabilities: {
         tools: {},
+        elicitation: {},
       },
       instructions:
         "This server provides tools to interact with Carrot Protocol",
@@ -63,44 +64,6 @@ export class CarrotMcpServer {
       },
     );
 
-    // send tx
-    this.server.tool(
-      "send_tx",
-      "Sends a transaction to the network",
-      {
-        signedTx: z
-          .string()
-          .describe("The signed transaction to send to the network"),
-      },
-      {
-        title: "Send Transaction",
-        description: "Sends a transaction to the network",
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-      },
-      async ({ signedTx }) => {
-        try {
-          const txSig = await this.crtClient.sendTx(signedTx);
-          logger.info(`tx sent`, { txSig });
-          return {
-            content: [
-              {
-                type: "text",
-                text: `tx sent successfully, here's the transaction signature: ${txSig}`,
-              },
-            ],
-          };
-        } catch (e) {
-          logger.error(`error sending tx`, { error: e });
-          return {
-            content: [{ type: "text", text: `Error sending tx: ${e}` }],
-            isError: true,
-          };
-        }
-      },
-    );
-
     // mint crt
     this.server.tool(
       "mint_crt",
@@ -120,7 +83,7 @@ export class CarrotMcpServer {
         destructiveHint: false,
         idempotentHint: false,
       },
-      async ({ uiAmount, walletStr }) => {
+      async ({ uiAmount, walletStr }, { sendRequest }) => {
         try {
           const mint = USDC_MINT.toString();
           const unsignedTx = await this.crtClient.getUnsignedIssueTx(
@@ -133,11 +96,45 @@ export class CarrotMcpServer {
             wallet: walletStr,
             inputMint: mint,
           });
+
+          const elicitationResult = await sendRequest(
+            {
+              method: "elicitation/create",
+              params: {
+                message: `Please sign the transaction to mint ${uiAmount} CRT.`,
+                requestedSchema: {
+                  type: "object",
+                  properties: {
+                    unsignedTx: { type: "string" },
+                    signedTx: { type: "string" },
+                  },
+                  required: ["signedTx"],
+                },
+                prefilled: {
+                  unsignedTx,
+                },
+              },
+            },
+            // Define the expected response schema from the client
+            z.object({
+              action: z.literal("accept"),
+              content: z.object({
+                signedTx: z.string(),
+              }),
+            }),
+          );
+
+          // 2. Client returned the signed transaction, now send it.
+          logger.info(`Received signed transaction, sending to network...`);
+          const txSig = await this.crtClient.sendTx(
+            elicitationResult.content.signedTx,
+          );
+          logger.info(`tx sent`, { txSig });
           return {
             content: [
               {
                 type: "text",
-                text: `sign this tx: ${unsignedTx} with ${walletStr} and send it back here using the send_tx tool`,
+                text: `Transaction to mint ${uiAmount} CRT was successful! Signature: ${txSig}`,
               },
             ],
           };
@@ -176,7 +173,7 @@ export class CarrotMcpServer {
         destructiveHint: false,
         idempotentHint: false,
       },
-      async ({ uiAmount, walletStr }) => {
+      async ({ uiAmount, walletStr }, { sendRequest }) => {
         try {
           const unsignedTx = await this.crtClient.getUnsignedRedeemTx(
             uiAmount,
@@ -188,11 +185,46 @@ export class CarrotMcpServer {
             wallet: walletStr,
             outputMint: USDC_MINT.toString(),
           });
+
+          const elicitationResult = await sendRequest(
+            {
+              method: "elicitation/create",
+              params: {
+                message: `Please sign the transaction to mint ${uiAmount} CRT.`,
+                requestedSchema: {
+                  type: "object",
+                  properties: {
+                    unsignedTx: { type: "string" },
+                    signedTx: { type: "string" },
+                  },
+                  required: ["signedTx"],
+                },
+                prefilled: {
+                  unsignedTx,
+                },
+              },
+            },
+            // Define the expected response schema from the client
+            z.object({
+              action: z.literal("accept"),
+              content: z.object({
+                signedTx: z.string(),
+              }),
+            }),
+          );
+
+          // 2. Client returned the signed transaction, now send it.
+          logger.info(`Received signed transaction, sending to network...`);
+          const txSig = await this.crtClient.sendTx(
+            elicitationResult.content.signedTx,
+          );
+
+          logger.info(`tx sent`, { txSig });
           return {
             content: [
               {
                 type: "text",
-                text: `sign this tx: ${unsignedTx} with ${walletStr} and send it back here using the send_tx tool`,
+                text: `burning ${uiAmount} CRT was successful! signature: ${txSig}`,
               },
             ],
           };
@@ -202,7 +234,7 @@ export class CarrotMcpServer {
             content: [
               {
                 type: "text",
-                text: `Error creating unsigned tx for burning CRT: ${e}`,
+                text: `error burning CRT ${e}`,
               },
             ],
             isError: true,

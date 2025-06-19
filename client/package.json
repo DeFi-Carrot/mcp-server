@@ -1,0 +1,37 @@
+{
+  "name": "@carrot/mcp-client",
+  "version": "1.0.0",
+  "description": "client to interact with carrot-mcp-server",
+  "main": "index.js",
+  "type": "module",
+  "bin": {
+    "client": "./build/index.js"
+  },
+  "scripts": {
+    "build": "npm i && tsc",
+    "clean": "rm -rf build package-lock.json node_modules/",
+    "start": "node build/index.js",
+    "fmt": "prettier --write src/",
+    "fmt:check": "prettier --check src/"
+  },
+  "files": [
+    "build"
+  ],
+  "keywords": [
+    "mcp",
+    "carrot-protocol"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.54.0",
+    "@coral-xyz/anchor": "^0.31.1",
+    "@modelcontextprotocol/sdk": "1.13.0",
+    "winston": "^3.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.3",
+    "prettier": "^3.5.3",
+    "typescript": "^5.8.3"
+  }
+}
