@@ -54,50 +54,78 @@ export class CarrotMcpClient {
       },
     ];
 
-    const response = await this.modelClient.messages.create({
+    logger.info("Processing query with Claude", { query });
+
+    // === LLM Turn 1: Decide which tool to use ===
+    const initialResponse = await this.modelClient.messages.create({
       model: MODEL_NAME,
-      max_tokens: 100,
+      max_tokens: 1000, // Increased from 100 for more robust tool use reasoning
       messages,
       tools: this.tools,
     });
 
-    const finalText: string[] = [];
+    // Append the assistant's response (including the tool_use request) to the message history
+    messages.push({
+      role: "assistant",
+      content: initialResponse.content,
+    });
 
-    for (const content of response.content) {
-      if (content.type === "text") {
-        logger.info("model returned text only response");
-        finalText.push(content.text);
-      } else if (content.type === "tool_use") {
-        const toolName = content.name;
-        const toolArgs = content.input as { [x: string]: unknown } | undefined;
+    // Check if the model wants to use a tool
+    const toolUseContent = initialResponse.content.find(
+      (content) => content.type === "tool_use",
+    );
 
-        // call mcp tool
-        const result = await this.mcpClient.callTool({
-          name: toolName,
-          arguments: toolArgs,
-        });
-        finalText.push(
-          `[Calling tool ${toolName} with args ${JSON.stringify(toolArgs)}]`,
-        );
-        logger.info("Calling tool", { toolName, toolArgs });
+    if (toolUseContent && toolUseContent.type === "tool_use") {
+      logger.info("Claude requested a tool call", {
+        toolName: toolUseContent.name,
+      });
 
-        messages.push({
-          role: "user",
-          content: result.content as string,
-        });
+      // === Your Code's Turn: Execute the tool ===
+      const toolResult = await this.mcpClient.callTool({
+        name: toolUseContent.name,
+        args: toolUseContent.input,
+      });
 
-        const response = await this.modelClient.messages.create({
-          model: MODEL_NAME,
-          max_tokens: 1000,
-          messages,
-        });
-
-        finalText.push(
-          response.content[0].type === "text" ? response.content[0].text : "",
-        );
+      // Extract the text from the tool result
+      const toolOutputText = (
+        toolResult.content as { text?: string }[] | undefined
+      )?.[0]?.text;
+      if (toolOutputText === undefined) {
+        throw new Error("Tool call did not return text content.");
       }
+
+      logger.info("Tool executed successfully", { result: toolOutputText });
+
+      // === LLM Turn 2: Send the tool result back to the model ===
+      messages.push({
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: toolUseContent.id,
+            content: toolOutputText, // Pass the extracted text string here
+          },
+        ],
+      });
+
+      // Get the final response from the model
+      const finalResponse = await this.modelClient.messages.create({
+        model: MODEL_NAME,
+        max_tokens: 1000,
+        messages, // Send the full conversation history
+        tools: this.tools,
+      });
+
+      // Assuming the final response is text
+      return finalResponse.content[0].type === "text"
+        ? finalResponse.content[0].text
+        : "The model did not return a text response.";
+    } else if (initialResponse.content[0].type === "text") {
+      // If no tool was used, just return the initial text response
+      logger.info("Claude responded directly without using a tool.");
+      return initialResponse.content[0].text;
     }
 
-    return finalText.join("\n");
+    return "An unexpected response format was received from the model.";
   }
 }

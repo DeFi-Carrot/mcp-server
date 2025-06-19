@@ -2,6 +2,20 @@ Directory structure:
 └── mcp-server/
     ├── README.md
     ├── makefile
+    ├── client/
+    │   ├── makefile
+    │   ├── .gitignore
+    │   ├── build/
+    │   │   ├── config.js
+    │   │   ├── index.js
+    │   │   ├── mcp.js
+    │   │   └── utils.js
+    │   ├── node_modules/
+    │   └── src/
+    │       ├── config.ts
+    │       ├── index.ts
+    │       ├── mcp.ts
+    │       └── utils.ts
     ├── infra/
     │   ├── .gitignore
     │   ├── .npmignore
@@ -92,6 +106,339 @@ File: makefile
 
 gi:
 	rm -rf llm/mcp-server.txt && gitingest -o llm/mcp-server.txt -e "llm/*" -e "**/.git/**" -e "**/node_modules/**" -e "**/target/**" -e "**/.anchor/**" -e "**/cdk.out/**" -e "*.github/*" -e "*.json*" -e "**/dist/**"
+
+
+================================================
+File: client/makefile
+================================================
+.DEFAULT_GOAL := build
+
+.PHONY: build clean fmt fmt_check
+
+build:
+	npm run build
+
+clean:
+	npm run clean
+
+start:
+	npm run start
+
+fmt:
+	npm run fmt
+
+fmt_check:
+	npm run fmt:check
+
+
+
+================================================
+File: client/.gitignore
+================================================
+node_modules/
+build/
+
+
+
+================================================
+File: client/build/config.js
+================================================
+export const MODEL_NAME = "claude-3-haiku-20240307";
+
+
+
+================================================
+File: client/build/index.js
+================================================
+import { CarrotMcpClient } from "./mcp.js";
+async function main() {
+    const modelApiKey = "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";
+    const mcpServerUrl = "http://localhost:8080/mcp";
+    const client = new CarrotMcpClient(modelApiKey, mcpServerUrl);
+    await client.connectToMcpServer();
+    const response = await client.processQuery("give me current apy for crt");
+    console.log(response);
+}
+main();
+
+
+
+================================================
+File: client/build/mcp.js
+================================================
+import { Anthropic } from "@anthropic-ai/sdk";
+import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
+import packageJson from "../package.json" with { type: "json" };
+import { logger } from "./utils.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { MODEL_NAME } from "./config.js";
+const { version } = packageJson;
+export class CarrotMcpClient {
+    mcpClient;
+    mcpServerUrl;
+    modelClient;
+    tools = [];
+    constructor(modelApiKey, mcpServerUrl) {
+        this.modelClient = new Anthropic({
+            apiKey: modelApiKey,
+        });
+        this.mcpClient = new McpClient({ name: "carrot-mcp-client", version });
+        this.mcpServerUrl = new URL(mcpServerUrl);
+    }
+    async connectToMcpServer() {
+        logger.info("Connecting to MCP server", { url: this.mcpServerUrl });
+        await this.mcpClient.connect(new StreamableHTTPClientTransport(this.mcpServerUrl));
+        // fetch the tools from the server
+        logger.info("Fetching tools from server");
+        const toolsResult = await this.mcpClient.listTools();
+        this.tools = toolsResult.tools.map((tool) => {
+            return {
+                name: tool.name,
+                description: tool.description,
+                input_schema: tool.inputSchema,
+            };
+        });
+        logger.info("Connected to server with tools", {
+            toolCount: this.tools.length,
+            tools: this.tools.map(({ name }) => name),
+        });
+    }
+    async processQuery(query) {
+        const messages = [
+            {
+                role: "user",
+                content: query,
+            },
+        ];
+        const response = await this.modelClient.messages.create({
+            model: MODEL_NAME,
+            max_tokens: 100,
+            messages,
+            tools: this.tools,
+        });
+        const finalText = [];
+        for (const content of response.content) {
+            if (content.type === "text") {
+                logger.info("model returned text only response");
+                finalText.push(content.text);
+            }
+            else if (content.type === "tool_use") {
+                const toolName = content.name;
+                const toolArgs = content.input;
+                // call mcp tool
+                const result = await this.mcpClient.callTool({
+                    name: toolName,
+                    arguments: toolArgs,
+                });
+                finalText.push(`[Calling tool ${toolName} with args ${JSON.stringify(toolArgs)}]`);
+                logger.info("Calling tool", { toolName, toolArgs });
+                messages.push({
+                    role: "user",
+                    content: result.content,
+                });
+                const response = await this.modelClient.messages.create({
+                    model: MODEL_NAME,
+                    max_tokens: 1000,
+                    messages,
+                });
+                finalText.push(response.content[0].type === "text" ? response.content[0].text : "");
+            }
+        }
+        return finalText.join("\n");
+    }
+}
+
+
+
+================================================
+File: client/build/utils.js
+================================================
+import winston from "winston";
+// Base logger configuration
+const loggerConfig = {
+    level: process.env.LOG_LEVEL || "info",
+    format: winston.format.combine(winston.format.timestamp(), winston.format.printf((info) => {
+        const { timestamp, level, message, service, ...metadata } = info;
+        return (`${timestamp} [${level}] [${service}]: ${message}` +
+            (Object.keys(metadata).length ? ` ${JSON.stringify(metadata)}` : ""));
+    }), winston.format.json()),
+    transports: [new winston.transports.Console()],
+};
+// Create the base logger
+export const logger = winston.createLogger({
+    ...loggerConfig,
+    defaultMeta: { service: "carrot-mcp-server" },
+});
+
+
+
+
+================================================
+File: client/src/config.ts
+================================================
+export const MODEL_NAME = "claude-3-haiku-20240307";
+
+
+
+================================================
+File: client/src/index.ts
+================================================
+import { CarrotMcpClient } from "./mcp.js";
+
+async function main() {
+  const modelApiKey =
+    "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";
+  const mcpServerUrl = "http://localhost:8080/mcp";
+
+  const client = new CarrotMcpClient(modelApiKey, mcpServerUrl);
+
+  await client.connectToMcpServer();
+
+  const response = await client.processQuery("give me current apy for crt");
+  console.log(response);
+}
+
+main();
+
+
+
+================================================
+File: client/src/mcp.ts
+================================================
+import { Anthropic } from "@anthropic-ai/sdk";
+import {
+  MessageParam,
+  Tool,
+} from "@anthropic-ai/sdk/resources/messages/messages.mjs";
+import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
+import packageJson from "../package.json" with { type: "json" };
+import { logger } from "./utils.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { MODEL_NAME } from "./config.js";
+const { version } = packageJson;
+
+export class CarrotMcpClient {
+  private mcpClient: McpClient;
+  private mcpServerUrl: URL;
+  private modelClient: Anthropic;
+  private tools: Tool[] = [];
+
+  constructor(modelApiKey: string, mcpServerUrl: string) {
+    this.modelClient = new Anthropic({
+      apiKey: modelApiKey,
+    });
+    this.mcpClient = new McpClient({ name: "carrot-mcp-client", version });
+    this.mcpServerUrl = new URL(mcpServerUrl);
+  }
+
+  async connectToMcpServer() {
+    logger.info("Connecting to MCP server", { url: this.mcpServerUrl });
+    await this.mcpClient.connect(
+      new StreamableHTTPClientTransport(this.mcpServerUrl),
+    );
+
+    // fetch the tools from the server
+    logger.info("Fetching tools from server");
+    const toolsResult = await this.mcpClient.listTools();
+    this.tools = toolsResult.tools.map((tool) => {
+      return {
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.inputSchema,
+      };
+    });
+    logger.info("Connected to server with tools", {
+      toolCount: this.tools.length,
+      tools: this.tools.map(({ name }) => name),
+    });
+  }
+
+  async processQuery(query: string) {
+    const messages: MessageParam[] = [
+      {
+        role: "user",
+        content: query,
+      },
+    ];
+
+    const response = await this.modelClient.messages.create({
+      model: MODEL_NAME,
+      max_tokens: 100,
+      messages,
+      tools: this.tools,
+    });
+
+    const finalText: string[] = [];
+
+    for (const content of response.content) {
+      if (content.type === "text") {
+        logger.info("model returned text only response");
+        finalText.push(content.text);
+      } else if (content.type === "tool_use") {
+        const toolName = content.name;
+        const toolArgs = content.input as { [x: string]: unknown } | undefined;
+
+        // call mcp tool
+        const result = await this.mcpClient.callTool({
+          name: toolName,
+          arguments: toolArgs,
+        });
+        finalText.push(
+          `[Calling tool ${toolName} with args ${JSON.stringify(toolArgs)}]`,
+        );
+        logger.info("Calling tool", { toolName, toolArgs });
+
+        messages.push({
+          role: "user",
+          content: result.content as string,
+        });
+
+        const response = await this.modelClient.messages.create({
+          model: MODEL_NAME,
+          max_tokens: 1000,
+          messages,
+        });
+
+        finalText.push(
+          response.content[0].type === "text" ? response.content[0].text : "",
+        );
+      }
+    }
+
+    return finalText.join("\n");
+  }
+}
+
+
+
+================================================
+File: client/src/utils.ts
+================================================
+import winston from "winston";
+
+// Base logger configuration
+const loggerConfig = {
+  level: process.env.LOG_LEVEL || "info",
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.printf((info) => {
+      const { timestamp, level, message, service, ...metadata } = info;
+      return (
+        `${timestamp} [${level}] [${service}]: ${message}` +
+        (Object.keys(metadata).length ? ` ${JSON.stringify(metadata)}` : "")
+      );
+    }),
+    winston.format.json(),
+  ),
+  transports: [new winston.transports.Console()],
+};
+
+// Create the base logger
+export const logger = winston.createLogger({
+  ...loggerConfig,
+  defaultMeta: { service: "carrot-mcp-server" },
+});
+
 
 
 ================================================
@@ -533,11 +880,11 @@ main();
 File: server/build/mcp.js
 ================================================
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import packageJson from "../package.json" with { type: "json" };
 import { CrtClient } from "./crt.js";
 import { USDC_MINT } from "./config.js";
 import { z } from "zod";
 import { logger } from "./utils.js";
+import packageJson from "../package.json" with { type: "json" };
 const { version } = packageJson;
 export class CarrotMcpServer {
     server;
@@ -950,12 +1297,12 @@ main();
 File: server/src/mcp.ts
 ================================================
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import packageJson from "../package.json" with { type: "json" };
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CrtClient } from "./crt.js";
 import { USDC_MINT } from "./config.js";
 import { z } from "zod";
 import { logger } from "./utils.js";
+import packageJson from "../package.json" with { type: "json" };
 const { version } = packageJson;
 
 export class CarrotMcpServer {
