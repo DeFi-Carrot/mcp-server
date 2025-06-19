@@ -9,9 +9,7 @@ async function main() {
 
   await client.connectToMcpServer();
 
-  const response = await client.processQuery(
-    "mint 1000 usdc worth of crt using wallet MxTeykfpirP5wGbTvbuDcDLNv7QGtMYadYL5Y11pdZh",
-  );
+  const response = await client.processQuery("mint 1000 usdc worth of crt");
   console.log(response);
 }
 

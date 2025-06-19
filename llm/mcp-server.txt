@@ -157,7 +157,7 @@ async function main() {
     const mcpServerUrl = "http://localhost:8080/mcp";
     const client = new CarrotMcpClient(modelApiKey, mcpServerUrl, "user1.json");
     await client.connectToMcpServer();
-    const response = await client.processQuery("mint 1000 usdc worth of crt using wallet MxTeykfpirP5wGbTvbuDcDLNv7QGtMYadYL5Y11pdZh");
+    const response = await client.processQuery("mint 1000 usdc worth of crt");
     console.log(response);
 }
 main();
@@ -191,7 +191,6 @@ export class CarrotMcpClient {
         this.mcpClient = new McpClient({
             name: "carrot-mcp-client",
             version,
-            instructions: `You MUST use the following address for the 'walletStr' parameter: ${this.signer.publicKey.toString()} when a tool requires it.`,
         }, {
             capabilities: {
                 elicitation: {},
@@ -258,14 +257,26 @@ export class CarrotMcpClient {
         // Check if the model wants to use a tool
         const toolUseContent = initialResponse.content.find((content) => content.type === "tool_use");
         if (toolUseContent && toolUseContent.type === "tool_use") {
-            logger.info("Claude requested a tool call", {
-                toolName: toolUseContent.name,
-                toolUseContent,
+            const toolName = toolUseContent.name;
+            let toolArgs = toolUseContent.input;
+            logger.info("tool call requested", {
+                toolName,
+                toolArgs,
             });
-            // === Your Code's Turn: Execute the tool ===
+            // Find the tool's schema from the list we fetched on connection
+            const toolSchema = this.tools.find((t) => t.name === toolName);
+            // Check if the schema requires a 'walletStr' and if it's not already provided
+            if (toolSchema.input_schema.properties.walletStr) {
+                const walletStr = this.signer.publicKey.toString();
+                toolArgs.walletStr = walletStr;
+                logger.info(`injecting wallet address for tool`, {
+                    tool: toolName,
+                    args: toolArgs,
+                });
+            }
             const toolResult = await this.mcpClient.callTool({
-                name: toolUseContent.name,
-                args: toolUseContent.input,
+                name: toolName,
+                arguments: toolArgs,
             });
             // Extract the text from the tool result
             const toolOutputText = toolResult.content?.[0]?.text;
@@ -310,8 +321,8 @@ export class CarrotMcpClient {
      * @returns A base64 encoded signed transaction string.
      */
     signTx(unsignedTx) {
-        const tx = web3.Transaction.from(Buffer.from(unsignedTx, "base64"));
-        tx.sign(this.signer);
+        const tx = web3.VersionedTransaction.deserialize(Buffer.from(unsignedTx, "base64"));
+        tx.sign([this.signer]);
         const signedTx = tx.serialize();
         return Buffer.from(signedTx).toString("base64");
     }
@@ -324,6 +335,7 @@ export class CarrotMcpClient {
             logger.error(errMsg);
             return { action: "reject" };
         }
+        logger.info(`parsed unsigned tx`);
         try {
             const signedTx = this.signTx(unsignedTx);
             logger.info("Transaction signed successfully for request.", { message });
@@ -393,9 +405,7 @@ async function main() {
 
   await client.connectToMcpServer();
 
-  const response = await client.processQuery(
-    "mint 1000 usdc worth of crt using wallet MxTeykfpirP5wGbTvbuDcDLNv7QGtMYadYL5Y11pdZh",
-  );
+  const response = await client.processQuery("mint 1000 usdc worth of crt");
   console.log(response);
 }
 
@@ -530,15 +540,29 @@ export class CarrotMcpClient {
     );
 
     if (toolUseContent && toolUseContent.type === "tool_use") {
-      logger.info("Claude requested a tool call", {
-        toolName: toolUseContent.name,
-        toolUseContent,
+      const toolName = toolUseContent.name;
+      let toolArgs = toolUseContent.input as any;
+      logger.info("tool call requested", {
+        toolName,
+        toolArgs,
       });
 
-      // === Your Code's Turn: Execute the tool ===
+      // Find the tool's schema from the list we fetched on connection
+      const toolSchema = this.tools.find((t) => t.name === toolName)!;
+
+      // Check if the schema requires a 'walletStr' and if it's not already provided
+      if ((toolSchema.input_schema.properties as any).walletStr) {
+        const walletStr = this.signer.publicKey.toString();
+        toolArgs.walletStr = walletStr;
+        logger.info(`injecting wallet address for tool`, {
+          tool: toolName,
+          args: toolArgs,
+        });
+      }
+
       const toolResult = await this.mcpClient.callTool({
-        name: toolUseContent.name,
-        args: toolUseContent.input,
+        name: toolName,
+        arguments: toolArgs,
       });
 
       // Extract the text from the tool result
@@ -591,8 +615,10 @@ export class CarrotMcpClient {
    * @returns A base64 encoded signed transaction string.
    */
   private signTx(unsignedTx: string): string {
-    const tx = web3.Transaction.from(Buffer.from(unsignedTx, "base64"));
-    tx.sign(this.signer);
+    const tx = web3.VersionedTransaction.deserialize(
+      Buffer.from(unsignedTx, "base64"),
+    );
+    tx.sign([this.signer]);
 
     const signedTx = tx.serialize();
 
@@ -611,6 +637,7 @@ export class CarrotMcpClient {
       logger.error(errMsg);
       return { action: "reject" };
     }
+    logger.info(`parsed unsigned tx`);
 
     try {
       const signedTx = this.signTx(unsignedTx);

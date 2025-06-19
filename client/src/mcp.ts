@@ -122,15 +122,29 @@ export class CarrotMcpClient {
     );
 
     if (toolUseContent && toolUseContent.type === "tool_use") {
-      logger.info("Claude requested a tool call", {
-        toolName: toolUseContent.name,
-        toolUseContent,
+      const toolName = toolUseContent.name;
+      let toolArgs = toolUseContent.input as any;
+      logger.info("tool call requested", {
+        toolName,
+        toolArgs,
       });
 
-      // === Your Code's Turn: Execute the tool ===
+      // Find the tool's schema from the list we fetched on connection
+      const toolSchema = this.tools.find((t) => t.name === toolName)!;
+
+      // Check if the schema requires a 'walletStr' and if it's not already provided
+      if ((toolSchema.input_schema.properties as any).walletStr) {
+        const walletStr = this.signer.publicKey.toString();
+        toolArgs.walletStr = walletStr;
+        logger.info(`injecting wallet address for tool`, {
+          tool: toolName,
+          args: toolArgs,
+        });
+      }
+
       const toolResult = await this.mcpClient.callTool({
-        name: toolUseContent.name,
-        args: toolUseContent.input,
+        name: toolName,
+        arguments: toolArgs,
       });
 
       // Extract the text from the tool result
@@ -183,8 +197,10 @@ export class CarrotMcpClient {
    * @returns A base64 encoded signed transaction string.
    */
   private signTx(unsignedTx: string): string {
-    const tx = web3.Transaction.from(Buffer.from(unsignedTx, "base64"));
-    tx.sign(this.signer);
+    const tx = web3.VersionedTransaction.deserialize(
+      Buffer.from(unsignedTx, "base64"),
+    );
+    tx.sign([this.signer]);
 
     const signedTx = tx.serialize();
 
@@ -203,6 +219,7 @@ export class CarrotMcpClient {
       logger.error(errMsg);
       return { action: "reject" };
     }
+    logger.info(`parsed unsigned tx`);
 
     try {
       const signedTx = this.signTx(unsignedTx);

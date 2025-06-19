@@ -224,7 +224,7 @@ export class CarrotMcpServer {
             content: [
               {
                 type: "text",
-                text: `Transaction to burn ${uiAmount} CRT was successful! Signature: ${txSig}`,
+                text: `burning ${uiAmount} CRT was successful! signature: ${txSig}`,
               },
             ],
           };
@@ -234,7 +234,7 @@ export class CarrotMcpServer {
             content: [
               {
                 type: "text",
-                text: `Error creating unsigned tx for burning CRT: ${e}`,
+                text: `error burning CRT ${e}`,
               },
             ],
             isError: true,
