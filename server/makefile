@@ -13,7 +13,7 @@ push:
 	npm run docker:tag
 	npm run docker:push
 
-start:
+start: build
 	npm run start
 
 start_docker:

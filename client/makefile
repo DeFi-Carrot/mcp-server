@@ -8,7 +8,7 @@ build:
 clean:
 	npm run clean
 
-start:
+start: build
 	npm run start
 
 fmt:
