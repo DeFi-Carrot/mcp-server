@@ -1,10 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import packageJson from "../package.json" with { type: "json" };
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CrtClient } from "./crt.js";
 import { USDC_MINT } from "./config.js";
 import { z } from "zod";
 import { logger } from "./utils.js";
+import packageJson from "../package.json" with { type: "json" };
 const { version } = packageJson;
 
 export class CarrotMcpServer {
