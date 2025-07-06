@@ -8,8 +8,11 @@ build:
 clean:
 	npm run clean
 
-start: build
-	npm run start
+local: build
+	npm run local
+
+prod: build
+	npm run prod
 
 fmt:
 	npm run fmt

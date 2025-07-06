@@ -40,3 +40,11 @@ vim ~/Library/Application\ Support/Claude/claude_desktop_config.json
   }
 }
 ```
+
+### TODO
+
+- get wallet balances tool
+- about crt
+- vault state tool
+- usdt/pyusd
+- reverse proxy layer

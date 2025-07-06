@@ -10,7 +10,8 @@
   "scripts": {
     "build": "npm i && tsc",
     "clean": "rm -rf build package-lock.json node_modules/",
-    "start": "node build/index.js",
+    "local": "MCP_SERVER_URL=http://localhost:8080/mcp node build/index.js",
+    "prod": "MCP_SERVER_URL=https://mcp.deficarrot.com/mcp node build/index.js",
     "fmt": "prettier --write src/",
     "fmt:check": "prettier --check src/"
   },

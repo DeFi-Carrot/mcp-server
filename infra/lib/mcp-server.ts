@@ -1,5 +1,6 @@
 import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
+import * as path from "path";
 
 export class McpServer extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -16,175 +17,192 @@ export class McpServer extends cdk.Stack {
       },
     });
 
-    // Get the existing cluster
+    // --- ECS Cluster ---
     const cluster = cdk.aws_ecs.Cluster.fromClusterAttributes(this, "Cluster", {
       clusterName: "CarrotCoreMain",
       vpc,
     });
 
-    const repository = new cdk.aws_ecr.Repository(
+    // --- DynamoDB Table for Session Management ---
+    const sessionTable = new cdk.aws_dynamodb.Table(this, `${id}SessionTable`, {
+      tableName: `${id}SessionTable`,
+      partitionKey: { name: "sessionId", type: cdk.aws_dynamodb.AttributeType.STRING },
+      billingMode: cdk.aws_dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      timeToLiveAttribute: "ttl",
+    });
+
+    // --- MCP Application Service ---
+    const appRepository = new cdk.aws_ecr.Repository(
       this,
-      `${id}McpServerEcrRepo`,
+      `${id}AppEcrRepo`,
       {
-        repositoryName: `${id.toLowerCase()}-repo`,
+        repositoryName: `${id.toLowerCase()}-app-repo`,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
         autoDeleteImages: true,
       },
     );
 
-    // Create task role
-    const taskRole = new cdk.aws_iam.Role(this, `${id}TaskRole`, {
+    const appTaskRole = new cdk.aws_iam.Role(this, `${id}AppTaskRole`, {
       assumedBy: new cdk.aws_iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
     });
 
-    const executionRole = new cdk.aws_iam.Role(this, `${id}ExecutionRole`, {
+    // Grant the app task role permissions to access the DynamoDB table
+    sessionTable.grantReadWriteData(appTaskRole);
+
+    const appExecutionRole = new cdk.aws_iam.Role(this, `${id}AppExecutionRole`, {
       assumedBy: new cdk.aws_iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
+      managedPolicies: [
+        cdk.aws_iam.ManagedPolicy.fromAwsManagedPolicyName(
+          "service-role/AmazonECSTaskExecutionRolePolicy"
+        ),
+      ],
     });
 
-    // Add necessary permissions to execution role
-    executionRole.addManagedPolicy(
-      cdk.aws_iam.ManagedPolicy.fromAwsManagedPolicyName(
-        "service-role/AmazonECSTaskExecutionRolePolicy",
-      ),
-    );
-
-    // Add ECR permissions
-    executionRole.addToPolicy(
-      new cdk.aws_iam.PolicyStatement({
-        actions: [
-          "ecr:GetDownloadUrlForLayer",
-          "ecr:BatchGetImage",
-          "ecr:BatchCheckLayerAvailability",
-          "ecr:GetAuthorizationToken",
-        ],
-        resources: [repository.repositoryArn],
-      }),
-    );
-
-    // Create task definition
-    const taskDefinition = new cdk.aws_ecs.Ec2TaskDefinition(
+    const appTaskDefinition = new cdk.aws_ecs.Ec2TaskDefinition(
       this,
-      `${id}TaskDef`,
+      `${id}AppTaskDef`,
       {
-        taskRole,
-        executionRole,
+        taskRole: appTaskRole,
+        executionRole: appExecutionRole,
         networkMode: cdk.aws_ecs.NetworkMode.AWS_VPC,
-      },
+      }
     );
 
-    // Add log group
-    const logGroupName = `/ecs/${id}-container`;
-    const logGroup = new cdk.aws_logs.LogGroup(this, `${id}LogGroup`, {
-      retention: cdk.aws_logs.RetentionDays.ONE_DAY,
-      logGroupName,
-    });
-
-    // Add main app container
-    taskDefinition.addContainer(`${id}Container`, {
-      image: cdk.aws_ecs.ContainerImage.fromEcrRepository(repository, "latest"),
+    appTaskDefinition.addContainer(`${id}AppContainer`, {
+      image: cdk.aws_ecs.ContainerImage.fromEcrRepository(appRepository, "latest"),
       memoryLimitMiB: 512,
       cpu: 256,
       logging: cdk.aws_ecs.LogDrivers.awsLogs({
-        streamPrefix: logGroupName,
-        logGroup,
+        streamPrefix: `/ecs/${id}-app`,
       }),
-      portMappings: [
-        {
-          containerPort: 8080,
-        },
+      portMappings: [{ containerPort: 8080 }],
+    });
+
+    const appService = new cdk.aws_ecs.Ec2Service(this, `${id}AppService`, {
+      cluster,
+      taskDefinition: appTaskDefinition,
+      desiredCount: 1,
+      // Configure Service Discovery for the app service
+      cloudMapOptions: {
+        name: "mcp-app", // This is the hostname NGINX will use
+        dnsTtl: cdk.Duration.seconds(10),
+      },
+      capacityProviderStrategies: [
+        { capacityProvider: capacityProviderProdName, weight: 1 },
       ],
     });
 
-    // --- Create a security group for the ECS service ---
-    const serviceSecurityGroup = new cdk.aws_ec2.SecurityGroup(
+    // --- NGINX Reverse Proxy Service ---
+    const nginxRepository = new cdk.aws_ecr.Repository(
       this,
-      `${id}ServiceSg`,
+      `${id}NginxEcrRepo`,
       {
-        vpc,
-        description: "Security group for the MCP ECS service",
-        allowAllOutbound: true,
-      },
+        repositoryName: `${id.toLowerCase()}-nginx-repo`,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        autoDeleteImages: true,
+      }
     );
 
-    // --- Create an Application Load Balancer (ALB) ---
-    const alb = new cdk.aws_elasticloadbalancingv2.ApplicationLoadBalancer(
+    const nginxTaskDefinition = new cdk.aws_ecs.Ec2TaskDefinition(
       this,
-      `${id}Alb`,
+      `${id}NginxTaskDef`,
+      {
+        networkMode: cdk.aws_ecs.NetworkMode.AWS_VPC,
+      }
+    );
+
+    nginxTaskDefinition.addContainer(`${id}NginxContainer`, {
+      image: cdk.aws_ecs.ContainerImage.fromAsset(
+        path.join(__dirname, "../../nginx-conf")
+      ),
+      memoryLimitMiB: 256,
+      cpu: 128,
+      logging: cdk.aws_ecs.LogDrivers.awsLogs({
+        streamPrefix: `/ecs/${id}-nginx`,
+      }),
+      portMappings: [{ containerPort: 80 }],
+    });
+
+    const nginxService = new cdk.aws_ecs.Ec2Service(this, `${id}NginxService`, {
+      cluster,
+      taskDefinition: nginxTaskDefinition,
+      desiredCount: 1,
+      capacityProviderStrategies: [
+        { capacityProvider: capacityProviderProdName, weight: 1 },
+      ],
+    });
+
+    // --- Network Load Balancer (NLB) ---
+    const nlb = new cdk.aws_elasticloadbalancingv2.NetworkLoadBalancer(
+      this,
+      `${id}Nlb`,
       {
         vpc,
         internetFacing: true,
-      },
+      }
     );
 
-    // manually created certificate in us-east-2
-    // manually created subdomain in route53
-    const certificate =
-      cdk.aws_certificatemanager.Certificate.fromCertificateArn(
-        this,
-        `${id}Cert`,
-        "arn:aws:acm:us-east-2:058264184558:certificate/ce6189af-c431-4a83-a897-f65903485504",
-      );
+    const certificate = cdk.aws_certificatemanager.Certificate.fromCertificateArn(
+      this,
+      `${id}Cert`,
+      "arn:aws:acm:us-east-2:058264184558:certificate/ce6189af-c431-4a83-a897-f65903485504"
+    );
 
-    // This listener will handle incoming HTTPS traffic on port 443
-    const httpsListener = alb.addListener(`${id}HttpsListener`, {
+    // Listener for TLS traffic on port 443
+    const tlsListener = nlb.addListener(`${id}TlsListener`, {
       port: 443,
-      certificates: [certificate], // Attach the certificate
-      protocol: cdk.aws_elasticloadbalancingv2.ApplicationProtocol.HTTPS,
+      protocol: cdk.aws_elasticloadbalancingv2.Protocol.TLS,
+      certificates: [certificate],
     });
 
-    // Create ECS service
-    const ecsService = new cdk.aws_ecs.Ec2Service(this, `${id}Service`, {
-      cluster,
-      taskDefinition,
-      desiredCount: 1,
-      placementConstraints: [],
-      securityGroups: [serviceSecurityGroup],
-      capacityProviderStrategies: [
-        {
-          capacityProvider: capacityProviderProdName,
-          weight: 1,
-        },
-      ],
-    });
-
-    // forward 443 to 80
-    httpsListener.addTargets(`${id}EcsTarget`, {
+    // Add the NGINX service as the target for the NLB listener
+    tlsListener.addTargets(`${id}NginxTarget`, {
       port: 80,
-      targets: [ecsService],
-      healthCheck: {
-        path: "/",
-        interval: cdk.Duration.seconds(30),
-      },
+      targets: [nginxService],
     });
 
-    // redirect 80 to 443
-    alb.addListener(`${id}HttpListener`, {
-      port: 80,
-      defaultAction: cdk.aws_elasticloadbalancingv2.ListenerAction.redirect({
-        protocol: "HTTPS",
-        port: "443",
-        permanent: true,
-      }),
-    });
+    // --- Security Groups ---
+    const appServiceSecurityGroup = new cdk.aws_ec2.SecurityGroup(
+      this,
+      `${id}AppServiceSg`,
+      { vpc, allowAllOutbound: true }
+    );
+    appService.connections.addSecurityGroup(appServiceSecurityGroup);
 
-    // --- Allow traffic from the ALB to the ECS service ---
-    // The security group for the ALB was opened on port 80 by the listener (open: true)
-    // Now, allow the service's security group to accept traffic from the ALB
-    ecsService.connections.allowFrom(
-      alb,
+    const nginxServiceSecurityGroup = new cdk.aws_ec2.SecurityGroup(
+      this,
+      `${id}NginxServiceSg`,
+      { vpc, allowAllOutbound: true }
+    );
+    nginxService.connections.addSecurityGroup(nginxServiceSecurityGroup);
+
+    // Allow traffic from NGINX to the App Service on port 8080
+    appServiceSecurityGroup.connections.allowFrom(
+      nginxServiceSecurityGroup,
       cdk.aws_ec2.Port.tcp(8080),
-      "Allow traffic from ALB",
+      "Allow traffic from NGINX to App"
     );
 
-    // Output the ECR repository URI
-    new cdk.CfnOutput(this, "EcrRepositoryUri", {
-      value: repository.repositoryUri,
-    });
+    // Allow traffic from the NLB to NGINX on port 80
+    nginxServiceSecurityGroup.connections.allowFrom(
+      nlb,
+      cdk.aws_ec2.Port.tcp(80),
+      "Allow traffic from NLB to NGINX"
+    );
 
-    // Output the application load balancer DNS name
+    // --- Outputs ---
+    new cdk.CfnOutput(this, "AppEcrRepositoryUri", {
+      value: appRepository.repositoryUri,
+    });
+    new cdk.CfnOutput(this, "NginxEcrRepositoryUri", {
+      value: nginxRepository.repositoryUri,
+    });
     new cdk.CfnOutput(this, "LoadBalancerDns", {
-      value: alb.loadBalancerDnsName,
-      description: "The public DNS name of the Application Load Balancer.",
+      value: nlb.loadBalancerDnsName,
+    });
+    new cdk.CfnOutput(this, "SessionTableName", {
+      value: sessionTable.tableName,
     });
   }
 }

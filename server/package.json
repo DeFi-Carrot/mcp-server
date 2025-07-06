@@ -27,6 +27,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.840.0",
+    "@aws-sdk/lib-dynamodb": "^3.840.0",
     "@carrot-protocol/http-client": "0.2.80",
     "@coral-xyz/anchor": "^0.29.0",
     "@modelcontextprotocol/sdk": "1.13.0",

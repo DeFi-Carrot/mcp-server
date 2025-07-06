@@ -15,3 +15,16 @@ export const CARROT_API_URL = "https://api.deficarrot.com";
 export const USDC_MINT = new web3.PublicKey(
   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
 );
+
+// default to memory session manager
+export const SESSION_MANAGER =
+  (process.env.SESSION_MANAGER! as "memory" | "dynamodb") ?? "memory";
+
+// for dynamodb session manager
+export const SESSION_TABLE_NAME: string | undefined =
+  process.env.SESSION_TABLE_NAME?.toString();
+
+export const SESSION_TIMEOUT_MS = Number(process.env.SESSION_TIMEOUT_MS!);
+
+// standard mcp session id header
+export const MCP_SESSION_ID_HEADER = "mcp-session-id";
