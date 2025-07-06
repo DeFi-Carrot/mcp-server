@@ -157,7 +157,7 @@ async function main() {
     const mcpServerUrl = "http://localhost:8080/mcp";
     const client = new CarrotMcpClient(modelApiKey, mcpServerUrl, "user1.json");
     await client.connectToMcpServer();
-    const response = await client.processQuery("mint 1000 usdc worth of crt");
+    const response = await client.processQuery("burn crt 10 crt");
     console.log(response);
 }
 main();
@@ -405,7 +405,7 @@ async function main() {
 
   await client.connectToMcpServer();
 
-  const response = await client.processQuery("mint 1000 usdc worth of crt");
+  const response = await client.processQuery("burn crt 10 crt");
   console.log(response);
 }
 
@@ -1058,6 +1058,8 @@ function asyncHandler(fn) {
 File: server/build/config.js
 ================================================
 import { web3 } from "@coral-xyz/anchor";
+export const CRT_MINT = new web3.PublicKey("CRTx1JouZhzSU6XytsE42UQraoGqiHgxabocVfARTy2s");
+export const CRT_MINT_DECIMALS = 9;
 export const CRT_VAULT_ADDRESS = new web3.PublicKey("FfCRL34rkJiMiX5emNDrYp3MdWH2mES3FvDQyFppqgpJ");
 export const CARROT_API_URL = "https://api.deficarrot.com";
 export const USDC_MINT = new web3.PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
@@ -1068,7 +1070,7 @@ export const USDC_MINT = new web3.PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGG
 File: server/build/crt.js
 ================================================
 import { Client as CarrotHttpClient, Common, } from "@carrot-protocol/http-client";
-import { CARROT_API_URL, CRT_VAULT_ADDRESS } from "./config.js";
+import { CARROT_API_URL, CRT_MINT_DECIMALS, CRT_VAULT_ADDRESS, } from "./config.js";
 import anchorPkg from "@coral-xyz/anchor";
 const { BN, web3 } = anchorPkg;
 export class CrtClient {
@@ -1092,7 +1094,18 @@ export class CrtClient {
         const txSig = await this.carrotClient.sendSignedTx(signedBase64Tx);
         return txSig;
     }
-    async getUnsignedIssueTx(uiAmount, assetMintStr, walletStr) {
+    async getUnsignedIssueTx(uiAmount, selectedMint, assetMintStr, // usdc for now
+    walletStr) {
+        let usdcAmountUi = 0;
+        if (selectedMint === "crt") {
+            // if amount is in crt, we need to convert it to usdc
+            const vault = await this.carrotClient.getVault(CRT_VAULT_ADDRESS, true);
+            // assumes 1 usdc = 1 usd
+            usdcAmountUi = vault.navPostFee * uiAmount;
+        }
+        else {
+            throw new Error("invalid mint");
+        }
         // setup the params
         const amount = Common.uiToAmount(uiAmount, 6);
         if (amount.lte(new BN(0))) {
@@ -1103,9 +1116,19 @@ export class CrtClient {
         const response = await this.carrotClient.prepareIssue(CRT_VAULT_ADDRESS, assetMint, amount, wallet);
         return response.tx;
     }
-    async getUnsignedRedeemTx(uiAmount, assetMintStr, walletStr) {
+    async getUnsignedRedeemTx(uiAmount, selectedMint, assetMintStr, walletStr) {
         // setup the params
-        const amount = Common.uiToAmount(uiAmount, 6);
+        let crtAmountUi = 0;
+        if (selectedMint === "usdc") {
+            // if amount is in usdc, we need to convert it to crt
+            const vault = await this.carrotClient.getVault(CRT_VAULT_ADDRESS, true);
+            crtAmountUi = vault.navPostFee * uiAmount;
+        }
+        else {
+            throw new Error("invalid mint");
+        }
+        // convert to integer amount
+        const amount = Common.uiToAmount(crtAmountUi, CRT_MINT_DECIMALS);
         if (amount.lte(new BN(0))) {
             throw new Error("amount must be > 0");
         }
@@ -1137,7 +1160,7 @@ File: server/build/mcp.js
 ================================================
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CrtClient } from "./crt.js";
-import { USDC_MINT } from "./config.js";
+import { CRT_MINT, USDC_MINT } from "./config.js";
 import { z } from "zod";
 import { logger } from "./utils.js";
 import packageJson from "../package.json" with { type: "json" };
@@ -1194,25 +1217,31 @@ export class CarrotMcpServer {
             walletStr: z
                 .string()
                 .describe("The wallet address to use to mint CRT, this must be the signer and this is the destination address for the minted CRT"),
+            issueDirection: z
+                .string()
+                .describe("The direction of the issue, crt or usdc. For example am i issuing/mint 1 CRT or issuing/mint whatever i get with 1000 USDC"),
         }, {
             title: "Mint CRT",
             description: "Mints the Carrot Protocol token (CRT)",
             readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: false,
-        }, async ({ uiAmount, walletStr }, { sendRequest }) => {
+        }, async ({ uiAmount, walletStr, issueDirection }, { sendRequest }) => {
             try {
-                const mint = USDC_MINT.toString();
-                const unsignedTx = await this.crtClient.getUnsignedIssueTx(uiAmount, mint, walletStr);
+                let selectedMint = USDC_MINT.toString();
+                if (issueDirection === "crt") {
+                    selectedMint = CRT_MINT.toString();
+                }
+                const unsignedTx = await this.crtClient.getUnsignedIssueTx(uiAmount, selectedMint, USDC_MINT.toString(), walletStr);
                 logger.info(`mint tx created`, {
                     uiAmount,
                     wallet: walletStr,
-                    inputMint: mint,
+                    inputMint: USDC_MINT.toString(),
                 });
                 const elicitationResult = await sendRequest({
                     method: "elicitation/create",
                     params: {
-                        message: `Please sign the transaction to mint ${uiAmount} CRT.`,
+                        message: `Please sign the transaction to mint CRT.`,
                         requestedSchema: {
                             type: "object",
                             properties: {
@@ -1241,7 +1270,7 @@ export class CarrotMcpServer {
                     content: [
                         {
                             type: "text",
-                            text: `Transaction to mint ${uiAmount} CRT was successful! Signature: ${txSig}`,
+                            text: `Transaction to mint CRT was successful! Signature: ${txSig}`,
                         },
                     ],
                 };
@@ -1265,15 +1294,22 @@ export class CarrotMcpServer {
             walletStr: z
                 .string()
                 .describe("The wallet address to use to burn CRT, this must be the signer and this is the destination address for the USDC"),
+            redeemDirection: z
+                .string()
+                .describe("The direction of the redeem, crt or usdc. For example am i redeeming/burning 1 CRT or redeeming/burning 1000 usdc worth of crt"),
         }, {
             title: "Burn CRT",
             description: "Burns the Carrot Protocol token (CRT) in exchange for USDC",
             readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: false,
-        }, async ({ uiAmount, walletStr }, { sendRequest }) => {
+        }, async ({ uiAmount, walletStr, redeemDirection }, { sendRequest }) => {
             try {
-                const unsignedTx = await this.crtClient.getUnsignedRedeemTx(uiAmount, USDC_MINT.toString(), walletStr);
+                let selectedMint = USDC_MINT.toString();
+                if (redeemDirection === "crt") {
+                    selectedMint = CRT_MINT.toString();
+                }
+                const unsignedTx = await this.crtClient.getUnsignedRedeemTx(uiAmount, selectedMint, USDC_MINT.toString(), walletStr);
                 logger.info(`burn tx created`, {
                     uiAmount,
                     wallet: walletStr,
@@ -1282,7 +1318,7 @@ export class CarrotMcpServer {
                 const elicitationResult = await sendRequest({
                     method: "elicitation/create",
                     params: {
-                        message: `Please sign the transaction to mint ${uiAmount} CRT.`,
+                        message: `Please sign the transaction to burn CRT`,
                         requestedSchema: {
                             type: "object",
                             properties: {
@@ -1377,7 +1413,7 @@ export class Router {
         });
     };
     handleMcpRequest = async (req, res) => {
-        const sessionId = req.headers['mcp-session-id'];
+        const sessionId = req.headers["mcp-session-id"];
         let transport = undefined;
         if (sessionId) {
             transport = this.transports.get(sessionId);
@@ -1385,14 +1421,15 @@ export class Router {
                 res.status(404).json({ error: "Session not found" });
                 return;
             }
-            // --- NEW: Reset the timeout on every new request for an existing session ---
             this.resetSessionTimeout(sessionId);
         }
         else if (isInitializeRequest(req.body)) {
             transport = new StreamableHTTPServerTransport({
                 sessionIdGenerator: () => randomUUID(),
                 onsessioninitialized: (newSessionId) => {
-                    logger.info(`New MCP session initialized`, { sessionId: newSessionId });
+                    logger.info(`New MCP session initialized`, {
+                        sessionId: newSessionId,
+                    });
                     this.transports.set(newSessionId, transport);
                     // --- NEW: Start the inactivity timer for the new session ---
                     this.resetSessionTimeout(newSessionId);
@@ -1401,7 +1438,9 @@ export class Router {
             transport.onclose = () => {
                 if (transport?.sessionId) {
                     const sid = transport.sessionId;
-                    logger.info("Session closed, removing transport and timeout.", { sessionId: sid });
+                    logger.info("Session closed, removing transport and timeout.", {
+                        sessionId: sid,
+                    });
                     // --- NEW: Clean up both the transport and the timeout timer ---
                     this.transports.delete(sid);
                     clearTimeout(this.sessionTimeouts.get(sid));
@@ -1488,6 +1527,12 @@ File: server/src/config.ts
 ================================================
 import { web3 } from "@coral-xyz/anchor";
 
+export const CRT_MINT = new web3.PublicKey(
+  "CRTx1JouZhzSU6XytsE42UQraoGqiHgxabocVfARTy2s",
+);
+
+export const CRT_MINT_DECIMALS = 9;
+
 export const CRT_VAULT_ADDRESS = new web3.PublicKey(
   "FfCRL34rkJiMiX5emNDrYp3MdWH2mES3FvDQyFppqgpJ",
 );
@@ -1507,7 +1552,11 @@ import {
   Client as CarrotHttpClient,
   Common,
 } from "@carrot-protocol/http-client";
-import { CARROT_API_URL, CRT_VAULT_ADDRESS } from "./config.js";
+import {
+  CARROT_API_URL,
+  CRT_MINT_DECIMALS,
+  CRT_VAULT_ADDRESS,
+} from "./config.js";
 import anchorPkg from "@coral-xyz/anchor";
 const { BN, web3 } = anchorPkg;
 
@@ -1543,9 +1592,21 @@ export class CrtClient {
 
   async getUnsignedIssueTx(
     uiAmount: number,
-    assetMintStr: string,
+    selectedMint: string,
+    assetMintStr: string, // usdc for now
     walletStr: string,
   ): Promise<string> {
+    let usdcAmountUi = 0;
+    if (selectedMint === "crt") {
+      // if amount is in crt, we need to convert it to usdc
+      const vault = await this.carrotClient.getVault(CRT_VAULT_ADDRESS, true);
+
+      // assumes 1 usdc = 1 usd
+      usdcAmountUi = vault.navPostFee * uiAmount;
+    } else {
+      throw new Error("invalid mint");
+    }
+
     // setup the params
     const amount = Common.uiToAmount(uiAmount, 6);
     if (amount.lte(new BN(0))) {
@@ -1567,11 +1628,23 @@ export class CrtClient {
 
   async getUnsignedRedeemTx(
     uiAmount: number,
+    selectedMint: string,
     assetMintStr: string,
     walletStr: string,
   ): Promise<string> {
     // setup the params
-    const amount = Common.uiToAmount(uiAmount, 6);
+
+    let crtAmountUi = 0;
+    if (selectedMint === "usdc") {
+      // if amount is in usdc, we need to convert it to crt
+      const vault = await this.carrotClient.getVault(CRT_VAULT_ADDRESS, true);
+      crtAmountUi = vault.navPostFee * uiAmount;
+    } else {
+      throw new Error("invalid mint");
+    }
+
+    // convert to integer amount
+    const amount = Common.uiToAmount(crtAmountUi, CRT_MINT_DECIMALS);
     if (amount.lte(new BN(0))) {
       throw new Error("amount must be > 0");
     }
@@ -1614,7 +1687,7 @@ File: server/src/mcp.ts
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CrtClient } from "./crt.js";
-import { USDC_MINT } from "./config.js";
+import { CRT_MINT, USDC_MINT } from "./config.js";
 import { z } from "zod";
 import { logger } from "./utils.js";
 import packageJson from "../package.json" with { type: "json" };
@@ -1688,6 +1761,11 @@ export class CarrotMcpServer {
           .describe(
             "The wallet address to use to mint CRT, this must be the signer and this is the destination address for the minted CRT",
           ),
+        issueDirection: z
+          .string()
+          .describe(
+            "The direction of the issue, crt or usdc. For example am i issuing/mint 1 CRT or issuing/mint whatever i get with 1000 USDC",
+          ),
       },
       {
         title: "Mint CRT",
@@ -1696,25 +1774,29 @@ export class CarrotMcpServer {
         destructiveHint: false,
         idempotentHint: false,
       },
-      async ({ uiAmount, walletStr }, { sendRequest }) => {
+      async ({ uiAmount, walletStr, issueDirection }, { sendRequest }) => {
         try {
-          const mint = USDC_MINT.toString();
+          let selectedMint = USDC_MINT.toString();
+          if (issueDirection === "crt") {
+            selectedMint = CRT_MINT.toString();
+          }
           const unsignedTx = await this.crtClient.getUnsignedIssueTx(
             uiAmount,
-            mint,
+            selectedMint,
+            USDC_MINT.toString(),
             walletStr,
           );
           logger.info(`mint tx created`, {
             uiAmount,
             wallet: walletStr,
-            inputMint: mint,
+            inputMint: USDC_MINT.toString(),
           });
 
           const elicitationResult = await sendRequest(
             {
               method: "elicitation/create",
               params: {
-                message: `Please sign the transaction to mint ${uiAmount} CRT.`,
+                message: `Please sign the transaction to mint CRT.`,
                 requestedSchema: {
                   type: "object",
                   properties: {
@@ -1747,7 +1829,7 @@ export class CarrotMcpServer {
             content: [
               {
                 type: "text",
-                text: `Transaction to mint ${uiAmount} CRT was successful! Signature: ${txSig}`,
+                text: `Transaction to mint CRT was successful! Signature: ${txSig}`,
               },
             ],
           };
@@ -1777,6 +1859,11 @@ export class CarrotMcpServer {
           .describe(
             "The wallet address to use to burn CRT, this must be the signer and this is the destination address for the USDC",
           ),
+        redeemDirection: z
+          .string()
+          .describe(
+            "The direction of the redeem, crt or usdc. For example am i redeeming/burning 1 CRT or redeeming/burning 1000 usdc worth of crt",
+          ),
       },
       {
         title: "Burn CRT",
@@ -1786,10 +1873,15 @@ export class CarrotMcpServer {
         destructiveHint: false,
         idempotentHint: false,
       },
-      async ({ uiAmount, walletStr }, { sendRequest }) => {
+      async ({ uiAmount, walletStr, redeemDirection }, { sendRequest }) => {
         try {
+          let selectedMint = USDC_MINT.toString();
+          if (redeemDirection === "crt") {
+            selectedMint = CRT_MINT.toString();
+          }
           const unsignedTx = await this.crtClient.getUnsignedRedeemTx(
             uiAmount,
+            selectedMint,
             USDC_MINT.toString(),
             walletStr,
           );
@@ -1803,7 +1895,7 @@ export class CarrotMcpServer {
             {
               method: "elicitation/create",
               params: {
-                message: `Please sign the transaction to mint ${uiAmount} CRT.`,
+                message: `Please sign the transaction to burn CRT`,
                 requestedSchema: {
                   type: "object",
                   properties: {

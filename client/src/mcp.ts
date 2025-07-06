@@ -155,7 +155,7 @@ export class CarrotMcpClient {
         throw new Error("Tool call did not return text content.");
       }
 
-      logger.info("Tool executed successfully", { result: toolOutputText });
+      logger.info("Tool executed", { result: toolOutputText });
 
       // === LLM Turn 2: Send the tool result back to the model ===
       messages.push({
