@@ -1,6 +1,6 @@
 {
   "name": "@carrot/mcp-client",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "client to interact with carrot-mcp-server",
   "main": "index.js",
   "type": "module",

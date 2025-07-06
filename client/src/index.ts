@@ -9,7 +9,7 @@ async function main() {
 
   await client.connectToMcpServer();
 
-  const response = await client.processQuery("mint 1000 usdc worth of crt");
+  const response = await client.processQuery("redeem all of my crt");
   console.log(response);
 }
 

@@ -1,3 +1,4 @@
+import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import winston from "winston";
 
 // Base logger configuration
@@ -22,3 +23,14 @@ export const logger = winston.createLogger({
   ...loggerConfig,
   defaultMeta: { service: "carrot-mcp-server" },
 });
+
+// generic error message for tool calls
+export const CRT_MCP_ERROR: CallToolResult = {
+  content: [
+    {
+      type: "text",
+      text: "An error occurred while processing your request. Please try again.",
+    },
+  ],
+  isError: true,
+};
