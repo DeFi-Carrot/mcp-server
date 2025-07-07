@@ -25,6 +25,8 @@ Directory structure:
     │   │   └── mcp-server.ts
     │   └── node_modules/
     ├── llm/
+    ├── nginx-conf/
+    │   └── nginx.conf
     ├── server/
     │   ├── Dockerfile
     │   ├── makefile
@@ -36,6 +38,7 @@ Directory structure:
     │   │   ├── index.js
     │   │   ├── mcp.js
     │   │   ├── router.js
+    │   │   ├── sessionManager.js
     │   │   └── utils.js
     │   ├── node_modules/
     │   └── src/
@@ -45,6 +48,7 @@ Directory structure:
     │       ├── index.ts
     │       ├── mcp.ts
     │       ├── router.ts
+    │       ├── sessionManager.ts
     │       └── utils.ts
     └── .github/
 
@@ -94,6 +98,14 @@ vim ~/Library/Application\ Support/Claude/claude_desktop_config.json
 }
 ```
 
+### TODO
+
+- get wallet balances tool
+- about crt
+- vault state tool
+- usdt/pyusd
+- reverse proxy layer
+
 
 
 ================================================
@@ -120,8 +132,11 @@ build:
 clean:
 	npm run clean
 
-start: build
-	npm run start
+local: build
+	npm run local
+
+prod: build
+	npm run prod
 
 fmt:
 	npm run fmt
@@ -145,19 +160,20 @@ user1.json
 File: client/build/config.js
 ================================================
 export const MODEL_NAME = "claude-3-haiku-20240307";
+export const MCP_SERVER_URL = process.env.MCP_SERVER_URL;
 
 
 
 ================================================
 File: client/build/index.js
 ================================================
+import { MCP_SERVER_URL } from "./config.js";
 import { CarrotMcpClient } from "./mcp.js";
 async function main() {
     const modelApiKey = "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";
-    const mcpServerUrl = "http://localhost:8080/mcp";
-    const client = new CarrotMcpClient(modelApiKey, mcpServerUrl, "user1.json");
+    const client = new CarrotMcpClient(modelApiKey, MCP_SERVER_URL, "user1.json");
     await client.connectToMcpServer();
-    const response = await client.processQuery("burn crt 10 crt");
+    const response = await client.processQuery("issue max amount of crt i can");
     console.log(response);
 }
 main();
@@ -283,7 +299,7 @@ export class CarrotMcpClient {
             if (toolOutputText === undefined) {
                 throw new Error("Tool call did not return text content.");
             }
-            logger.info("Tool executed successfully", { result: toolOutputText });
+            logger.info("Tool executed", { result: toolOutputText });
             // === LLM Turn 2: Send the tool result back to the model ===
             messages.push({
                 role: "user",
@@ -389,23 +405,25 @@ File: client/src/config.ts
 ================================================
 export const MODEL_NAME = "claude-3-haiku-20240307";
 
+export const MCP_SERVER_URL = process.env.MCP_SERVER_URL!;
+
 
 
 ================================================
 File: client/src/index.ts
 ================================================
+import { MCP_SERVER_URL } from "./config.js";
 import { CarrotMcpClient } from "./mcp.js";
 
 async function main() {
   const modelApiKey =
     "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";
-  const mcpServerUrl = "http://localhost:8080/mcp";
 
-  const client = new CarrotMcpClient(modelApiKey, mcpServerUrl, "user1.json");
+  const client = new CarrotMcpClient(modelApiKey, MCP_SERVER_URL, "user1.json");
 
   await client.connectToMcpServer();
 
-  const response = await client.processQuery("burn crt 10 crt");
+  const response = await client.processQuery("issue max amount of crt i can");
   console.log(response);
 }
 
@@ -573,7 +591,7 @@ export class CarrotMcpClient {
         throw new Error("Tool call did not return text content.");
       }
 
-      logger.info("Tool executed successfully", { result: toolOutputText });
+      logger.info("Tool executed", { result: toolOutputText });
 
       // === LLM Turn 2: Send the tool result back to the model ===
       messages.push({
@@ -746,6 +764,7 @@ File: infra/lib/mcp-server.ts
 ================================================
 import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
+import * as path from "path";
 
 export class McpServer extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -762,180 +781,242 @@ export class McpServer extends cdk.Stack {
       },
     });
 
-    // Get the existing cluster
+    // --- ECS Cluster ---
     const cluster = cdk.aws_ecs.Cluster.fromClusterAttributes(this, "Cluster", {
       clusterName: "CarrotCoreMain",
       vpc,
     });
 
-    const repository = new cdk.aws_ecr.Repository(
+    // --- DynamoDB Table for Session Management ---
+    const sessionTable = new cdk.aws_dynamodb.Table(this, `${id}SessionTable`, {
+      tableName: `${id}SessionTable`,
+      partitionKey: { name: "sessionId", type: cdk.aws_dynamodb.AttributeType.STRING },
+      billingMode: cdk.aws_dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      timeToLiveAttribute: "ttl",
+    });
+
+    // --- MCP Application Service ---
+    const appRepository = new cdk.aws_ecr.Repository(
       this,
-      `${id}McpServerEcrRepo`,
+      `${id}AppEcrRepo`,
       {
-        repositoryName: `${id.toLowerCase()}-repo`,
+        repositoryName: `${id.toLowerCase()}-app-repo`,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
         autoDeleteImages: true,
       },
     );
 
-    // Create task role
-    const taskRole = new cdk.aws_iam.Role(this, `${id}TaskRole`, {
+    const appTaskRole = new cdk.aws_iam.Role(this, `${id}AppTaskRole`, {
       assumedBy: new cdk.aws_iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
     });
 
-    const executionRole = new cdk.aws_iam.Role(this, `${id}ExecutionRole`, {
+    // Grant the app task role permissions to access the DynamoDB table
+    sessionTable.grantReadWriteData(appTaskRole);
+
+    const appExecutionRole = new cdk.aws_iam.Role(this, `${id}AppExecutionRole`, {
       assumedBy: new cdk.aws_iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
+      managedPolicies: [
+        cdk.aws_iam.ManagedPolicy.fromAwsManagedPolicyName(
+          "service-role/AmazonECSTaskExecutionRolePolicy"
+        ),
+      ],
     });
 
-    // Add necessary permissions to execution role
-    executionRole.addManagedPolicy(
-      cdk.aws_iam.ManagedPolicy.fromAwsManagedPolicyName(
-        "service-role/AmazonECSTaskExecutionRolePolicy",
-      ),
-    );
-
-    // Add ECR permissions
-    executionRole.addToPolicy(
-      new cdk.aws_iam.PolicyStatement({
-        actions: [
-          "ecr:GetDownloadUrlForLayer",
-          "ecr:BatchGetImage",
-          "ecr:BatchCheckLayerAvailability",
-          "ecr:GetAuthorizationToken",
-        ],
-        resources: [repository.repositoryArn],
-      }),
-    );
-
-    // Create task definition
-    const taskDefinition = new cdk.aws_ecs.Ec2TaskDefinition(
+    const appTaskDefinition = new cdk.aws_ecs.Ec2TaskDefinition(
       this,
-      `${id}TaskDef`,
+      `${id}AppTaskDef`,
       {
-        taskRole,
-        executionRole,
+        taskRole: appTaskRole,
+        executionRole: appExecutionRole,
         networkMode: cdk.aws_ecs.NetworkMode.AWS_VPC,
-      },
+      }
     );
 
-    // Add log group
-    const logGroupName = `/ecs/${id}-container`;
-    const logGroup = new cdk.aws_logs.LogGroup(this, `${id}LogGroup`, {
-      retention: cdk.aws_logs.RetentionDays.ONE_DAY,
-      logGroupName,
-    });
-
-    // Add main app container
-    taskDefinition.addContainer(`${id}Container`, {
-      image: cdk.aws_ecs.ContainerImage.fromEcrRepository(repository, "latest"),
+    appTaskDefinition.addContainer(`${id}AppContainer`, {
+      image: cdk.aws_ecs.ContainerImage.fromEcrRepository(appRepository, "latest"),
       memoryLimitMiB: 512,
       cpu: 256,
       logging: cdk.aws_ecs.LogDrivers.awsLogs({
-        streamPrefix: logGroupName,
-        logGroup,
+        streamPrefix: `/ecs/${id}-app`,
       }),
-      portMappings: [
-        {
-          containerPort: 8080,
-        },
+      portMappings: [{ containerPort: 8080 }],
+    });
+
+    const appService = new cdk.aws_ecs.Ec2Service(this, `${id}AppService`, {
+      cluster,
+      taskDefinition: appTaskDefinition,
+      desiredCount: 1,
+      // Configure Service Discovery for the app service
+      cloudMapOptions: {
+        name: "mcp-app", // This is the hostname NGINX will use
+        dnsTtl: cdk.Duration.seconds(10),
+      },
+      capacityProviderStrategies: [
+        { capacityProvider: capacityProviderProdName, weight: 1 },
       ],
     });
 
-    // --- Create a security group for the ECS service ---
-    const serviceSecurityGroup = new cdk.aws_ec2.SecurityGroup(
+    // --- NGINX Reverse Proxy Service ---
+    const nginxRepository = new cdk.aws_ecr.Repository(
       this,
-      `${id}ServiceSg`,
+      `${id}NginxEcrRepo`,
       {
-        vpc,
-        description: "Security group for the MCP ECS service",
-        allowAllOutbound: true,
-      },
+        repositoryName: `${id.toLowerCase()}-nginx-repo`,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        autoDeleteImages: true,
+      }
     );
 
-    // --- Create an Application Load Balancer (ALB) ---
-    const alb = new cdk.aws_elasticloadbalancingv2.ApplicationLoadBalancer(
+    const nginxTaskDefinition = new cdk.aws_ecs.Ec2TaskDefinition(
       this,
-      `${id}Alb`,
+      `${id}NginxTaskDef`,
+      {
+        networkMode: cdk.aws_ecs.NetworkMode.AWS_VPC,
+      }
+    );
+
+    nginxTaskDefinition.addContainer(`${id}NginxContainer`, {
+      image: cdk.aws_ecs.ContainerImage.fromAsset(
+        path.join(__dirname, "../../nginx-conf")
+      ),
+      memoryLimitMiB: 256,
+      cpu: 128,
+      logging: cdk.aws_ecs.LogDrivers.awsLogs({
+        streamPrefix: `/ecs/${id}-nginx`,
+      }),
+      portMappings: [{ containerPort: 80 }],
+    });
+
+    const nginxService = new cdk.aws_ecs.Ec2Service(this, `${id}NginxService`, {
+      cluster,
+      taskDefinition: nginxTaskDefinition,
+      desiredCount: 1,
+      capacityProviderStrategies: [
+        { capacityProvider: capacityProviderProdName, weight: 1 },
+      ],
+    });
+
+    // --- Network Load Balancer (NLB) ---
+    const nlb = new cdk.aws_elasticloadbalancingv2.NetworkLoadBalancer(
+      this,
+      `${id}Nlb`,
       {
         vpc,
         internetFacing: true,
-      },
+      }
     );
 
-    // manually created certificate in us-east-2
-    // manually created subdomain in route53
-    const certificate =
-      cdk.aws_certificatemanager.Certificate.fromCertificateArn(
-        this,
-        `${id}Cert`,
-        "arn:aws:acm:us-east-2:058264184558:certificate/ce6189af-c431-4a83-a897-f65903485504",
-      );
+    const certificate = cdk.aws_certificatemanager.Certificate.fromCertificateArn(
+      this,
+      `${id}Cert`,
+      "arn:aws:acm:us-east-2:058264184558:certificate/ce6189af-c431-4a83-a897-f65903485504"
+    );
 
-    // This listener will handle incoming HTTPS traffic on port 443
-    const httpsListener = alb.addListener(`${id}HttpsListener`, {
+    // Listener for TLS traffic on port 443
+    const tlsListener = nlb.addListener(`${id}TlsListener`, {
       port: 443,
-      certificates: [certificate], // Attach the certificate
-      protocol: cdk.aws_elasticloadbalancingv2.ApplicationProtocol.HTTPS,
+      protocol: cdk.aws_elasticloadbalancingv2.Protocol.TLS,
+      certificates: [certificate],
     });
 
-    // Create ECS service
-    const ecsService = new cdk.aws_ecs.Ec2Service(this, `${id}Service`, {
-      cluster,
-      taskDefinition,
-      desiredCount: 1,
-      placementConstraints: [],
-      securityGroups: [serviceSecurityGroup],
-      capacityProviderStrategies: [
-        {
-          capacityProvider: capacityProviderProdName,
-          weight: 1,
-        },
-      ],
-    });
-
-    // forward 443 to 80
-    httpsListener.addTargets(`${id}EcsTarget`, {
+    // Add the NGINX service as the target for the NLB listener
+    tlsListener.addTargets(`${id}NginxTarget`, {
       port: 80,
-      targets: [ecsService],
-      healthCheck: {
-        path: "/",
-        interval: cdk.Duration.seconds(30),
-      },
+      targets: [nginxService],
     });
 
-    // redirect 80 to 443
-    alb.addListener(`${id}HttpListener`, {
-      port: 80,
-      defaultAction: cdk.aws_elasticloadbalancingv2.ListenerAction.redirect({
-        protocol: "HTTPS",
-        port: "443",
-        permanent: true,
-      }),
-    });
+    // --- Security Groups ---
+    const appServiceSecurityGroup = new cdk.aws_ec2.SecurityGroup(
+      this,
+      `${id}AppServiceSg`,
+      { vpc, allowAllOutbound: true }
+    );
+    appService.connections.addSecurityGroup(appServiceSecurityGroup);
 
-    // --- Allow traffic from the ALB to the ECS service ---
-    // The security group for the ALB was opened on port 80 by the listener (open: true)
-    // Now, allow the service's security group to accept traffic from the ALB
-    ecsService.connections.allowFrom(
-      alb,
+    const nginxServiceSecurityGroup = new cdk.aws_ec2.SecurityGroup(
+      this,
+      `${id}NginxServiceSg`,
+      { vpc, allowAllOutbound: true }
+    );
+    nginxService.connections.addSecurityGroup(nginxServiceSecurityGroup);
+
+    // Allow traffic from NGINX to the App Service on port 8080
+    appServiceSecurityGroup.connections.allowFrom(
+      nginxServiceSecurityGroup,
       cdk.aws_ec2.Port.tcp(8080),
-      "Allow traffic from ALB",
+      "Allow traffic from NGINX to App"
     );
 
-    // Output the ECR repository URI
-    new cdk.CfnOutput(this, "EcrRepositoryUri", {
-      value: repository.repositoryUri,
-    });
+    // Allow traffic from the NLB to NGINX on port 80
+    nginxServiceSecurityGroup.connections.allowFrom(
+      nlb,
+      cdk.aws_ec2.Port.tcp(80),
+      "Allow traffic from NLB to NGINX"
+    );
 
-    // Output the application load balancer DNS name
+    // --- Outputs ---
+    new cdk.CfnOutput(this, "AppEcrRepositoryUri", {
+      value: appRepository.repositoryUri,
+    });
+    new cdk.CfnOutput(this, "NginxEcrRepositoryUri", {
+      value: nginxRepository.repositoryUri,
+    });
     new cdk.CfnOutput(this, "LoadBalancerDns", {
-      value: alb.loadBalancerDnsName,
-      description: "The public DNS name of the Application Load Balancer.",
+      value: nlb.loadBalancerDnsName,
+    });
+    new cdk.CfnOutput(this, "SessionTableName", {
+      value: sessionTable.tableName,
     });
   }
 }
 
 
+
+
+
+================================================
+File: nginx-conf/nginx.conf
+================================================
+# /etc/nginx/conf.d/nginx.conf
+
+# Define an upstream server block for the MCP application.
+# NGINX will use ECS Service Discovery to resolve the 'mcp-app' hostname
+# to the private IP addresses of your application tasks.
+upstream mcp_app_service {
+    # The service discovery name for your MCP application service.
+    # The A records for this name will be the IPs of the tasks.
+    server mcp-app.local:8080;
+}
+
+server {
+    listen 80;
+    server_name _;
+
+    # Increase timeouts for long-lived MCP connections (e.g., SSE).
+    proxy_read_timeout 24h;
+    proxy_send_timeout 24h;
+    keepalive_timeout 24h;
+
+    location / {
+        # Forward requests to the mcp_app_service upstream.
+        proxy_pass http://mcp_app_service;
+
+        # Set headers to pass necessary information to the application.
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Essential for WebSocket and SSE (long-lived connections).
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "Upgrade";
+
+        # Disable buffering to allow for streaming responses like SSE.
+        proxy_buffering off;
+    }
+}
 
 
 
@@ -1028,11 +1109,12 @@ import express from "express";
 import { Router } from "./router.js";
 import { logger } from "./utils.js";
 import packageJson from "../package.json" with { type: "json" };
+import { SESSION_MANAGER } from "./config.js";
 const { version } = packageJson;
 export class Api {
     app;
     constructor() {
-        const router = new Router();
+        const router = new Router(SESSION_MANAGER);
         const app = express();
         app.use(express.json());
         // routes
@@ -1063,6 +1145,14 @@ export const CRT_MINT_DECIMALS = 9;
 export const CRT_VAULT_ADDRESS = new web3.PublicKey("FfCRL34rkJiMiX5emNDrYp3MdWH2mES3FvDQyFppqgpJ");
 export const CARROT_API_URL = "https://api.deficarrot.com";
 export const USDC_MINT = new web3.PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+// default to memory session manager
+export const SESSION_MANAGER = process.env.SESSION_MANAGER?.toString() ??
+    "memory";
+// for dynamodb session manager
+export const SESSION_TABLE_NAME = process.env.SESSION_TABLE_NAME?.toString();
+export const SESSION_TIMEOUT_MS = Number(process.env.SESSION_TIMEOUT_MS ?? 86000 * 1000);
+// standard mcp session id header
+export const MCP_SESSION_ID_HEADER = "mcp-session-id";
 
 
 
@@ -1070,8 +1160,9 @@ export const USDC_MINT = new web3.PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGG
 File: server/build/crt.js
 ================================================
 import { Client as CarrotHttpClient, Common, } from "@carrot-protocol/http-client";
-import { CARROT_API_URL, CRT_MINT_DECIMALS, CRT_VAULT_ADDRESS, } from "./config.js";
+import { CARROT_API_URL, CRT_MINT, CRT_MINT_DECIMALS, CRT_VAULT_ADDRESS, USDC_MINT, } from "./config.js";
 import anchorPkg from "@coral-xyz/anchor";
+import { logger } from "./utils.js";
 const { BN, web3 } = anchorPkg;
 export class CrtClient {
     carrotClient;
@@ -1094,46 +1185,65 @@ export class CrtClient {
         const txSig = await this.carrotClient.sendSignedTx(signedBase64Tx);
         return txSig;
     }
-    async getUnsignedIssueTx(uiAmount, selectedMint, assetMintStr, // usdc for now
+    async getUnsignedIssueTx(uiAmount, issueArgs, assetMintStr, // usdc for now
     walletStr) {
-        let usdcAmountUi = 0;
-        if (selectedMint === "crt") {
+        const assetMint = new web3.PublicKey(assetMintStr);
+        const wallet = new web3.PublicKey(walletStr);
+        let usdcAmountUi = uiAmount;
+        const issueAll = issueArgs.issueAll ?? false;
+        if (!issueAll && issueArgs.selectedMint === CRT_MINT.toString()) {
             // if amount is in crt, we need to convert it to usdc
             const vault = await this.carrotClient.getVault(CRT_VAULT_ADDRESS, true);
-            // assumes 1 usdc = 1 usd
             usdcAmountUi = vault.navPostFee * uiAmount;
+            logger.info("converting crt to usdc", {
+                crtAmountUi: uiAmount,
+                usdcAmountUi,
+            });
         }
-        else {
-            throw new Error("invalid mint");
+        if (issueAll) {
+            // fetch user token data from carrot api
+            const userResponse = await this.carrotClient.getUser(CRT_VAULT_ADDRESS, wallet);
+            usdcAmountUi =
+                userResponse.assets.find((a) => a.mint.equals(assetMint))?.amountUi ??
+                    0;
         }
         // setup the params
-        const amount = Common.uiToAmount(uiAmount, 6);
+        const amount = Common.uiToAmount(usdcAmountUi, 6);
         if (amount.lte(new BN(0))) {
             throw new Error("amount must be > 0");
         }
-        const assetMint = new web3.PublicKey(assetMintStr);
-        const wallet = new web3.PublicKey(walletStr);
         const response = await this.carrotClient.prepareIssue(CRT_VAULT_ADDRESS, assetMint, amount, wallet);
         return response.tx;
     }
-    async getUnsignedRedeemTx(uiAmount, selectedMint, assetMintStr, walletStr) {
-        // setup the params
-        let crtAmountUi = 0;
-        if (selectedMint === "usdc") {
+    async getUnsignedRedeemTx(uiAmount, redeemArgs, assetMintStr, walletStr) {
+        // parse inputs
+        const assetMint = new web3.PublicKey(assetMintStr);
+        const wallet = new web3.PublicKey(walletStr);
+        let crtAmountUi = uiAmount;
+        const redeemAll = redeemArgs.redeemAll ?? false;
+        if (!redeemAll && redeemArgs.selectedMint === USDC_MINT.toString()) {
             // if amount is in usdc, we need to convert it to crt
             const vault = await this.carrotClient.getVault(CRT_VAULT_ADDRESS, true);
             crtAmountUi = vault.navPostFee * uiAmount;
+            logger.info("converted usdc to crt", {
+                usdcAmountUi: uiAmount,
+                crtAmountUi,
+            });
         }
-        else {
-            throw new Error("invalid mint");
+        // if redeeming all, we need to get the balance of the wallet's CRT token account
+        if (redeemAll) {
+            // fetch user token data from carrot api
+            const userResponse = await this.carrotClient.getUser(CRT_VAULT_ADDRESS, wallet);
+            crtAmountUi = userResponse.sharesAmountUi;
+            logger.info("redeeming all crt", {
+                crtAmountUi,
+            });
         }
         // convert to integer amount
         const amount = Common.uiToAmount(crtAmountUi, CRT_MINT_DECIMALS);
         if (amount.lte(new BN(0))) {
             throw new Error("amount must be > 0");
         }
-        const assetMint = new web3.PublicKey(assetMintStr);
-        const wallet = new web3.PublicKey(walletStr);
         const response = await this.carrotClient.prepareRedeem(CRT_VAULT_ADDRESS, assetMint, amount, wallet);
         return response.tx;
     }
@@ -1162,7 +1272,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CrtClient } from "./crt.js";
 import { CRT_MINT, USDC_MINT } from "./config.js";
 import { z } from "zod";
-import { logger } from "./utils.js";
+import { CRT_MCP_ERROR, logger } from "./utils.js";
 import packageJson from "../package.json" with { type: "json" };
 const { version } = packageJson;
 export class CarrotMcpServer {
@@ -1211,160 +1321,224 @@ export class CarrotMcpServer {
                 };
             }
         });
-        // mint crt
-        this.server.tool("mint_crt", "Mints the Carrot Protocol token (CRT)", {
-            uiAmount: z.number().describe("The amount of USDC to use to mint CRT"),
+        // issue crt
+        this.server.tool("issue_crt", "Mints the Carrot Protocol token (CRT)", {
+            uiAmount: z.number().describe("The amount of CRT to mint"),
             walletStr: z
                 .string()
                 .describe("The wallet address to use to mint CRT, this must be the signer and this is the destination address for the minted CRT"),
-            issueDirection: z
-                .string()
-                .describe("The direction of the issue, crt or usdc. For example am i issuing/mint 1 CRT or issuing/mint whatever i get with 1000 USDC"),
         }, {
-            title: "Mint CRT",
+            title: "Issue CRT",
             description: "Mints the Carrot Protocol token (CRT)",
             readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: false,
-        }, async ({ uiAmount, walletStr, issueDirection }, { sendRequest }) => {
+        }, async ({ uiAmount, walletStr }, { sendRequest }) => {
             try {
-                let selectedMint = USDC_MINT.toString();
-                if (issueDirection === "crt") {
-                    selectedMint = CRT_MINT.toString();
-                }
-                const unsignedTx = await this.crtClient.getUnsignedIssueTx(uiAmount, selectedMint, USDC_MINT.toString(), walletStr);
+                // create unsigned tx
+                const unsignedTx = await this.crtClient.getUnsignedIssueTx(uiAmount, { selectedMint: CRT_MINT.toString() }, USDC_MINT.toString(), walletStr);
                 logger.info(`mint tx created`, {
                     uiAmount,
                     wallet: walletStr,
                     inputMint: USDC_MINT.toString(),
                 });
-                const elicitationResult = await sendRequest({
-                    method: "elicitation/create",
-                    params: {
-                        message: `Please sign the transaction to mint CRT.`,
-                        requestedSchema: {
-                            type: "object",
-                            properties: {
-                                unsignedTx: { type: "string" },
-                                signedTx: { type: "string" },
-                            },
-                            required: ["signedTx"],
-                        },
-                        prefilled: {
-                            unsignedTx,
-                        },
-                    },
-                }, 
-                // Define the expected response schema from the client
-                z.object({
-                    action: z.literal("accept"),
-                    content: z.object({
-                        signedTx: z.string(),
-                    }),
-                }));
-                // 2. Client returned the signed transaction, now send it.
-                logger.info(`Received signed transaction, sending to network...`);
-                const txSig = await this.crtClient.sendTx(elicitationResult.content.signedTx);
-                logger.info(`tx sent`, { txSig });
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: `Transaction to mint CRT was successful! Signature: ${txSig}`,
-                        },
-                    ],
-                };
+                // elicit signature and send tx
+                return await this.elicitAndSendTransaction(unsignedTx, sendRequest, `Please sign the transaction to mint ${uiAmount} CRT`, `Transaction to mint ${uiAmount} CRT was successful!`);
             }
             catch (e) {
                 logger.error(`error creating mint tx`, { error: e });
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: `Error creating unsigned tx for minting CRT: ${e}`,
-                        },
-                    ],
-                    isError: true,
-                };
+                return CRT_MCP_ERROR;
             }
         });
-        // burn crt
-        this.server.tool("burn_crt", "Burns the Carrot Protocol token (CRT) in exchange for USDC", {
-            uiAmount: z.number().describe("The amount of CRT to use to burn"),
+        // mint crt
+        this.server.tool("issue_crt_with_usdc", "Mints the Carrot Protocol token (CRT) specified in units of USDC", {
+            uiAmount: z.number().describe("The amount of USDC to use to mint CRT"),
             walletStr: z
                 .string()
-                .describe("The wallet address to use to burn CRT, this must be the signer and this is the destination address for the USDC"),
-            redeemDirection: z
-                .string()
-                .describe("The direction of the redeem, crt or usdc. For example am i redeeming/burning 1 CRT or redeeming/burning 1000 usdc worth of crt"),
+                .describe("The wallet address to use to mint CRT, this must be the signer and this is the destination address for the minted CRT"),
         }, {
-            title: "Burn CRT",
-            description: "Burns the Carrot Protocol token (CRT) in exchange for USDC",
+            title: "Issue CRT with USDC",
+            description: "Mints the Carrot Protocol token (CRT) specified in units of USDC",
             readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: false,
-        }, async ({ uiAmount, walletStr, redeemDirection }, { sendRequest }) => {
+        }, async ({ uiAmount, walletStr }, { sendRequest }) => {
             try {
-                let selectedMint = USDC_MINT.toString();
-                if (redeemDirection === "crt") {
-                    selectedMint = CRT_MINT.toString();
-                }
-                const unsignedTx = await this.crtClient.getUnsignedRedeemTx(uiAmount, selectedMint, USDC_MINT.toString(), walletStr);
+                // create unsigned tx
+                const unsignedTx = await this.crtClient.getUnsignedIssueTx(uiAmount, { selectedMint: USDC_MINT.toString() }, USDC_MINT.toString(), walletStr);
+                logger.info(`mint tx created`, {
+                    uiAmount,
+                    wallet: walletStr,
+                    inputMint: USDC_MINT.toString(),
+                });
+                // elicit signature and send tx
+                return await this.elicitAndSendTransaction(unsignedTx, sendRequest, `Please sign the transaction to mint ${uiAmount} CRT`, `Transaction to mint ${uiAmount} CRT was successful!`);
+            }
+            catch (e) {
+                logger.error(`error creating mint tx`, { error: e });
+                return CRT_MCP_ERROR;
+            }
+        });
+        // mint all crt
+        this.server.tool("issue_all_crt", "Uses all of the USDC in the wallet to mint CRT", {
+            walletStr: z
+                .string()
+                .describe("The wallet address to use to mint CRT, this must be the signer and this is the destination address for the minted CRT"),
+        }, {
+            title: "Issue all CRT",
+            description: "Uses all of the USDC in the wallet to mint CRT",
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: false,
+        }, async ({ walletStr }, { sendRequest }) => {
+            logger.info(`issue_all_crt start`, {
+                wallet: walletStr,
+            });
+            try {
+                const unsignedTx = await this.crtClient.getUnsignedIssueTx(100, { issueAll: true }, USDC_MINT.toString(), walletStr);
+                logger.info(`issue all tx created`, {
+                    wallet: walletStr,
+                    inputMint: USDC_MINT.toString(),
+                });
+                return await this.elicitAndSendTransaction(unsignedTx, sendRequest, `Please sign the transaction to issue all CRT`, `Transaction to issue all CRT was successful!`);
+            }
+            catch (e) {
+                logger.error(`error creating issue tx`, { error: e });
+                return CRT_MCP_ERROR;
+            }
+        });
+        // redeem crt
+        this.server.tool("redeem_crt_with_desired_crt_amount", "Burns the Carrot Protocol token (CRT) in exchange for USDC", {
+            uiAmount: z.number().describe("The amount of CRT to redeem"),
+            walletStr: z
+                .string()
+                .describe("The wallet address to use to burn CRT, this must be the signer and this is the destination address for the USDC"),
+        }, {
+            title: "Redeem CRT with desired CRT amount",
+            description: "Redeems the Carrot Protocol token (CRT) in exchange for USDC, burning CRT in the process",
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: false,
+        }, async ({ uiAmount, walletStr }, { sendRequest }) => {
+            logger.info(`redeem_crt_with_desired_crt_amount start`, {
+                uiAmount,
+                wallet: walletStr,
+            });
+            try {
+                const unsignedTx = await this.crtClient.getUnsignedRedeemTx(uiAmount, { selectedMint: CRT_MINT.toString(), redeemAll: false }, USDC_MINT.toString(), walletStr);
                 logger.info(`burn tx created`, {
                     uiAmount,
                     wallet: walletStr,
                     outputMint: USDC_MINT.toString(),
                 });
-                const elicitationResult = await sendRequest({
-                    method: "elicitation/create",
-                    params: {
-                        message: `Please sign the transaction to burn CRT`,
-                        requestedSchema: {
-                            type: "object",
-                            properties: {
-                                unsignedTx: { type: "string" },
-                                signedTx: { type: "string" },
-                            },
-                            required: ["signedTx"],
-                        },
-                        prefilled: {
-                            unsignedTx,
-                        },
-                    },
-                }, 
-                // Define the expected response schema from the client
-                z.object({
-                    action: z.literal("accept"),
-                    content: z.object({
-                        signedTx: z.string(),
-                    }),
-                }));
-                // 2. Client returned the signed transaction, now send it.
-                logger.info(`Received signed transaction, sending to network...`);
-                const txSig = await this.crtClient.sendTx(elicitationResult.content.signedTx);
-                logger.info(`tx sent`, { txSig });
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: `burning ${uiAmount} CRT was successful! signature: ${txSig}`,
-                        },
-                    ],
-                };
+                return await this.elicitAndSendTransaction(unsignedTx, sendRequest, `Please sign the transaction to burn ${uiAmount} CRT`, `Transaction to burn ${uiAmount} CRT was successful!`);
             }
             catch (e) {
                 logger.error(`error creating burn tx`, { error: e });
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: `error burning CRT ${e}`,
-                        },
-                    ],
-                    isError: true,
-                };
+                return CRT_MCP_ERROR;
             }
         });
+        // redeem usdc
+        this.server.tool("redeem_crt_with_desired_usdc_amount", "Redeems the Carrot Protocol token (CRT) in exchange for desired amount of USDC", {
+            uiAmount: z
+                .number()
+                .describe("The amount of USDC you wish to receive, use any CRT amount to get the equivalent USDC amount"),
+            walletStr: z
+                .string()
+                .describe("The wallet address to use to burn CRT, this must be the signer and this is the destination address for the USDC"),
+        }, {
+            title: "Redeem CRT with desired USDC amount",
+            description: "Redeems the Carrot Protocol token (CRT) in exchange for desired amount of USDC, burning CRT in the process",
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: false,
+        }, async ({ uiAmount, walletStr }, { sendRequest }) => {
+            try {
+                const unsignedTx = await this.crtClient.getUnsignedRedeemTx(uiAmount, { selectedMint: USDC_MINT.toString(), redeemAll: false }, USDC_MINT.toString(), walletStr);
+                logger.info(`burn tx created`, {
+                    uiAmount,
+                    wallet: walletStr,
+                    outputMint: USDC_MINT.toString(),
+                });
+                return await this.elicitAndSendTransaction(unsignedTx, sendRequest, `Please sign the transaction to redeem ${uiAmount} USDC`, `Transaction to redeem ${uiAmount} USDC was successful!`);
+            }
+            catch (e) {
+                logger.error(`error creating burn tx`, { error: e });
+                return CRT_MCP_ERROR;
+            }
+        });
+        // redeem crt
+        this.server.tool("redeem_all_crt", "Redeems all the Carrot Protocol token (CRT) in the wallet's ATA in exchange for USDC", {
+            walletStr: z
+                .string()
+                .describe("The wallet address to use to burn CRT, this must be the signer and this is the destination address for the USDC"),
+        }, {
+            title: "Redeem CRT with desired CRT amount",
+            description: "Redeems the Carrot Protocol token (CRT) in exchange for USDC, burning CRT in the process",
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: false,
+        }, async ({ walletStr }, { sendRequest }) => {
+            logger.info(`redeem_all_crt start`, {
+                wallet: walletStr,
+            });
+            try {
+                const unsignedTx = await this.crtClient.getUnsignedRedeemTx(100, { redeemAll: true }, // redeem all is true, dont need to specify the amount
+                USDC_MINT.toString(), walletStr);
+                logger.info(`burn all tx created`, {
+                    wallet: walletStr,
+                    outputMint: USDC_MINT.toString(),
+                });
+                return await this.elicitAndSendTransaction(unsignedTx, sendRequest, `Please sign the transaction to burn all CRT`, `Transaction to burn all CRT was successful!`);
+            }
+            catch (e) {
+                logger.error(`error creating burn tx`, { error: e });
+                return CRT_MCP_ERROR;
+            }
+        });
+    }
+    async elicitAndSendTransaction(unsignedTx, sendRequest, elicitationMessage, successMessage) {
+        // 1. Elicit a signature from the client by sending the unsigned transaction
+        logger.info(`Requesting signature from client`, {
+            message: elicitationMessage,
+        });
+        const elicitationResult = await sendRequest({
+            method: "elicitation/create",
+            params: {
+                message: elicitationMessage,
+                requestedSchema: {
+                    type: "object",
+                    properties: {
+                        unsignedTx: { type: "string" },
+                        signedTx: { type: "string" },
+                    },
+                    required: ["signedTx"],
+                },
+                prefilled: {
+                    unsignedTx,
+                },
+            },
+        }, 
+        // Define the expected response schema from the client
+        z.object({
+            action: z.literal("accept"),
+            content: z.object({
+                signedTx: z.string(),
+            }),
+        }));
+        // 2. Client returned the signed transaction, now send it to the network.
+        logger.info(`Received signed transaction, sending`);
+        const txSig = await this.crtClient.sendTx(elicitationResult.content.signedTx);
+        logger.info(`Transaction sent successfully`, { txSig });
+        // 3. Return the success result to the user
+        return {
+            content: [
+                {
+                    type: "text",
+                    text: `${successMessage} Signature: ${txSig}`,
+                },
+            ],
+        };
     }
 }
 
@@ -1379,32 +1553,21 @@ import { CarrotMcpServer } from "./mcp.js";
 import packageJson from "../package.json" with { type: "json" };
 import { randomUUID } from "node:crypto";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { DynamoDbSessionManager, InMemorySessionManager, } from "./sessionManager.js";
+import { SESSION_TABLE_NAME, SESSION_TIMEOUT_MS } from "./config.js";
 const { version } = packageJson;
-const SESSION_TIMEOUT_MS = 1 * 60 * 1000; // 1 minute
 export class Router {
     mcpServer;
-    transports = new Map();
-    sessionTimeouts = new Map();
-    constructor() {
+    sessionManager;
+    constructor(sessionManager) {
+        if (sessionManager === "dynamodb") {
+            this.sessionManager = new DynamoDbSessionManager(SESSION_TABLE_NAME, SESSION_TIMEOUT_MS);
+        }
+        else {
+            this.sessionManager = new InMemorySessionManager(SESSION_TIMEOUT_MS);
+        }
         logger.info("Router initialized in stateful, multi-session mode with inactivity timeout.");
         this.mcpServer = new CarrotMcpServer();
-    }
-    // --- NEW: Function to reset the inactivity timer for a session ---
-    resetSessionTimeout(sessionId) {
-        // Clear any existing timer for this session
-        if (this.sessionTimeouts.has(sessionId)) {
-            clearTimeout(this.sessionTimeouts.get(sessionId));
-        }
-        // Set a new timer
-        const timeout = setTimeout(() => {
-            logger.info("Session timed out due to inactivity.", { sessionId });
-            const transport = this.transports.get(sessionId);
-            if (transport) {
-                transport.close(); // This will trigger the onclose handler
-            }
-            // The onclose handler will remove it from the maps
-        }, SESSION_TIMEOUT_MS);
-        this.sessionTimeouts.set(sessionId, timeout);
     }
     getIndex = (_req, res) => {
         res.json({
@@ -1416,35 +1579,34 @@ export class Router {
         const sessionId = req.headers["mcp-session-id"];
         let transport = undefined;
         if (sessionId) {
-            transport = this.transports.get(sessionId);
-            if (!transport) {
+            const sessionData = await this.sessionManager.getSession(sessionId);
+            if (!sessionData) {
                 res.status(404).json({ error: "Session not found" });
                 return;
             }
-            this.resetSessionTimeout(sessionId);
+            transport = sessionData.transport;
+            // touch the session to reset the timeout
+            this.sessionManager.touchSession(sessionId);
         }
         else if (isInitializeRequest(req.body)) {
             transport = new StreamableHTTPServerTransport({
                 sessionIdGenerator: () => randomUUID(),
-                onsessioninitialized: (newSessionId) => {
+                onsessioninitialized: async (newSessionId) => {
+                    const sessionData = await this.sessionManager.createSession(newSessionId, transport);
                     logger.info(`New MCP session initialized`, {
-                        sessionId: newSessionId,
+                        sessionId: sessionData.sessionId,
+                        ttl: sessionData.ttl,
+                        createdAt: sessionData.updatedAt,
                     });
-                    this.transports.set(newSessionId, transport);
-                    // --- NEW: Start the inactivity timer for the new session ---
-                    this.resetSessionTimeout(newSessionId);
                 },
             });
-            transport.onclose = () => {
+            transport.onclose = async () => {
                 if (transport?.sessionId) {
                     const sid = transport.sessionId;
                     logger.info("Session closed, removing transport and timeout.", {
                         sessionId: sid,
                     });
-                    // --- NEW: Clean up both the transport and the timeout timer ---
-                    this.transports.delete(sid);
-                    clearTimeout(this.sessionTimeouts.get(sid));
-                    this.sessionTimeouts.delete(sid);
+                    await this.sessionManager.deleteSession(sid);
                 }
             };
             await this.mcpServer.initialize(transport);
@@ -1455,6 +1617,172 @@ export class Router {
         }
         await transport.handleRequest(req, res, req.body);
     };
+}
+
+
+
+================================================
+File: server/build/sessionManager.js
+================================================
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, } from "@aws-sdk/lib-dynamodb";
+import { logger } from "./utils.js";
+// --- DynamoDB Client Setup ---
+// The AWS SDK will automatically use credentials from the environment (e.g., IAM role).
+const dynamoClient = new DynamoDBClient({});
+const docClient = DynamoDBDocumentClient.from(dynamoClient);
+export function getRemainingTtl(sessionData) {
+    return sessionData.ttl - sessionData.updatedAt;
+}
+/**
+ * Abstract class defining the interface for session management.
+ * This allows swapping implementations for local testing vs. production.
+ */
+export class SessionManager {
+}
+/**
+ * In-memory implementation of SessionManager for local development and testing.
+ * It mimics the original stateful behavior of the router.
+ */
+export class InMemorySessionManager extends SessionManager {
+    sessions = new Map();
+    sessionTimeouts = new Map();
+    sessionTimeoutMs;
+    transports = new Map();
+    constructor(sessionTimeoutMs) {
+        super();
+        this.sessionTimeoutMs = sessionTimeoutMs;
+        this.transports = new Map();
+        logger.info("Using InMemorySessionManager for session storage.", {
+            sessionTimeoutMs,
+        });
+    }
+    resetSessionTimeout(sessionId) {
+        if (this.sessionTimeouts.has(sessionId)) {
+            clearTimeout(this.sessionTimeouts.get(sessionId));
+        }
+        const timeout = setTimeout(() => {
+            logger.info("In-memory session timed out due to inactivity.", {
+                sessionId,
+            });
+            this.deleteSession(sessionId);
+        }, this.sessionTimeoutMs);
+        this.sessionTimeouts.set(sessionId, timeout);
+    }
+    async getSession(sessionId) {
+        return this.sessions.get(sessionId);
+    }
+    async createSession(sessionId) {
+        const now = new Date().getTime();
+        const session = {
+            sessionId,
+            updatedAt: now,
+            ttl: now + this.sessionTimeoutMs,
+        };
+        this.sessions.set(sessionId, session);
+        this.resetSessionTimeout(sessionId);
+        logger.info("New in-memory session created", { sessionId });
+        return session;
+    }
+    async deleteSession(sessionId) {
+        this.sessions.delete(sessionId);
+        const timeout = this.sessionTimeouts.get(sessionId);
+        if (timeout) {
+            clearTimeout(timeout);
+            this.sessionTimeouts.delete(sessionId);
+        }
+        logger.info("In-memory session deleted", { sessionId });
+    }
+    async touchSession(sessionId) {
+        this.resetSessionTimeout(sessionId);
+    }
+}
+/**
+ * DynamoDB implementation of SessionManager for production environments.
+ */
+export class DynamoDbSessionManager extends SessionManager {
+    tableName;
+    sessionTimeoutMs;
+    constructor(tableName, sessionTimeoutMs) {
+        super();
+        this.tableName = tableName;
+        this.sessionTimeoutMs = sessionTimeoutMs;
+        logger.info("Using DynamoDbSessionManager for session storage.", {
+            tableName,
+            sessionTimeoutMs,
+        });
+    }
+    async getSession(sessionId) {
+        try {
+            const { Item } = await docClient.send(new GetCommand({
+                TableName: this.tableName,
+                Key: { sessionId },
+            }));
+            return Item;
+        }
+        catch (error) {
+            logger.error("DynamoDB getSession failed", { sessionId, error });
+            return undefined;
+        }
+    }
+    async createSession(sessionId) {
+        const now = new Date().getTime();
+        const session = {
+            sessionId,
+            updatedAt: now,
+            ttl: now + this.sessionTimeoutMs,
+        };
+        try {
+            await docClient.send(new PutCommand({
+                TableName: this.tableName,
+                Item: session,
+            }));
+            logger.info("New session created in DynamoDB", {
+                sessionId,
+            });
+            return session;
+        }
+        catch (error) {
+            logger.error("Failed to create session in DynamoDB", { error });
+            throw new Error("Failed to create session in backend store.");
+        }
+    }
+    async deleteSession(sessionId) {
+        try {
+            await docClient.send(new DeleteCommand({
+                TableName: this.tableName,
+                Key: { sessionId },
+            }));
+            logger.info("DynamoDB session deleted", { sessionId });
+        }
+        catch (error) {
+            logger.error("Failed to delete session from DynamoDB", {
+                sessionId,
+                error,
+            });
+        }
+    }
+    async touchSession(sessionId) {
+        const now = new Date().getTime();
+        const newTtl = now + this.sessionTimeoutMs;
+        const updatedSession = {
+            sessionId,
+            updatedAt: now,
+            ttl: newTtl,
+        };
+        try {
+            await docClient.send(new PutCommand({
+                TableName: this.tableName,
+                Item: updatedSession,
+            }));
+        }
+        catch (error) {
+            logger.error("Failed to touch session in DynamoDB", {
+                sessionId,
+                error,
+            });
+        }
+    }
 }
 
 
@@ -1478,6 +1806,16 @@ export const logger = winston.createLogger({
     ...loggerConfig,
     defaultMeta: { service: "carrot-mcp-server" },
 });
+// generic error message for tool calls
+export const CRT_MCP_ERROR = {
+    content: [
+        {
+            type: "text",
+            text: "An error occurred while processing your request. Please try again.",
+        },
+    ],
+    isError: true,
+};
 
 
 
@@ -1489,13 +1827,14 @@ import express from "express";
 import { Router } from "./router.js";
 import { logger } from "./utils.js";
 import packageJson from "../package.json" with { type: "json" };
+import { SESSION_MANAGER } from "./config.js";
 const { version } = packageJson;
 
 export class Api {
   private app: express.Express;
 
   constructor() {
-    const router = new Router();
+    const router = new Router(SESSION_MANAGER);
     const app = express();
 
     app.use(express.json());
@@ -1543,6 +1882,22 @@ export const USDC_MINT = new web3.PublicKey(
   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
 );
 
+// default to memory session manager
+export const SESSION_MANAGER =
+  (process.env.SESSION_MANAGER?.toString() as "memory" | "dynamodb") ??
+  "memory";
+
+// for dynamodb session manager
+export const SESSION_TABLE_NAME: string | undefined =
+  process.env.SESSION_TABLE_NAME?.toString();
+
+export const SESSION_TIMEOUT_MS = Number(
+  process.env.SESSION_TIMEOUT_MS ?? 86000 * 1000, // default 24 hours
+);
+
+// standard mcp session id header
+export const MCP_SESSION_ID_HEADER = "mcp-session-id";
+
 
 
 ================================================
@@ -1554,10 +1909,13 @@ import {
 } from "@carrot-protocol/http-client";
 import {
   CARROT_API_URL,
+  CRT_MINT,
   CRT_MINT_DECIMALS,
   CRT_VAULT_ADDRESS,
+  USDC_MINT,
 } from "./config.js";
 import anchorPkg from "@coral-xyz/anchor";
+import { logger } from "./utils.js";
 const { BN, web3 } = anchorPkg;
 
 export class CrtClient {
@@ -1592,29 +1950,41 @@ export class CrtClient {
 
   async getUnsignedIssueTx(
     uiAmount: number,
-    selectedMint: string,
+    issueArgs: { selectedMint?: string; issueAll?: boolean },
     assetMintStr: string, // usdc for now
     walletStr: string,
   ): Promise<string> {
-    let usdcAmountUi = 0;
-    if (selectedMint === "crt") {
+    const assetMint = new web3.PublicKey(assetMintStr);
+    const wallet = new web3.PublicKey(walletStr);
+
+    let usdcAmountUi = uiAmount;
+    const issueAll = issueArgs.issueAll ?? false;
+    if (!issueAll && issueArgs.selectedMint === CRT_MINT.toString()) {
       // if amount is in crt, we need to convert it to usdc
       const vault = await this.carrotClient.getVault(CRT_VAULT_ADDRESS, true);
-
-      // assumes 1 usdc = 1 usd
       usdcAmountUi = vault.navPostFee * uiAmount;
-    } else {
-      throw new Error("invalid mint");
+      logger.info("converting crt to usdc", {
+        crtAmountUi: uiAmount,
+        usdcAmountUi,
+      });
+    }
+
+    if (issueAll) {
+      // fetch user token data from carrot api
+      const userResponse = await this.carrotClient.getUser(
+        CRT_VAULT_ADDRESS,
+        wallet,
+      );
+      usdcAmountUi =
+        userResponse.assets.find((a) => a.mint.equals(assetMint))?.amountUi ??
+        0;
     }
 
     // setup the params
-    const amount = Common.uiToAmount(uiAmount, 6);
+    const amount = Common.uiToAmount(usdcAmountUi, 6);
     if (amount.lte(new BN(0))) {
       throw new Error("amount must be > 0");
     }
-
-    const assetMint = new web3.PublicKey(assetMintStr);
-    const wallet = new web3.PublicKey(walletStr);
 
     const response = await this.carrotClient.prepareIssue(
       CRT_VAULT_ADDRESS,
@@ -1628,19 +1998,41 @@ export class CrtClient {
 
   async getUnsignedRedeemTx(
     uiAmount: number,
-    selectedMint: string,
+    redeemArgs: {
+      selectedMint?: string;
+      redeemAll?: boolean;
+    },
     assetMintStr: string,
     walletStr: string,
   ): Promise<string> {
-    // setup the params
+    // parse inputs
+    const assetMint = new web3.PublicKey(assetMintStr);
+    const wallet = new web3.PublicKey(walletStr);
 
-    let crtAmountUi = 0;
-    if (selectedMint === "usdc") {
+    let crtAmountUi = uiAmount;
+    const redeemAll = redeemArgs.redeemAll ?? false;
+    if (!redeemAll && redeemArgs.selectedMint === USDC_MINT.toString()) {
       // if amount is in usdc, we need to convert it to crt
       const vault = await this.carrotClient.getVault(CRT_VAULT_ADDRESS, true);
       crtAmountUi = vault.navPostFee * uiAmount;
-    } else {
-      throw new Error("invalid mint");
+      logger.info("converted usdc to crt", {
+        usdcAmountUi: uiAmount,
+        crtAmountUi,
+      });
+    }
+
+    // if redeeming all, we need to get the balance of the wallet's CRT token account
+    if (redeemAll) {
+      // fetch user token data from carrot api
+      const userResponse = await this.carrotClient.getUser(
+        CRT_VAULT_ADDRESS,
+        wallet,
+      );
+      crtAmountUi = userResponse.sharesAmountUi;
+
+      logger.info("redeeming all crt", {
+        crtAmountUi,
+      });
     }
 
     // convert to integer amount
@@ -1648,9 +2040,6 @@ export class CrtClient {
     if (amount.lte(new BN(0))) {
       throw new Error("amount must be > 0");
     }
-
-    const assetMint = new web3.PublicKey(assetMintStr);
-    const wallet = new web3.PublicKey(walletStr);
 
     const response = await this.carrotClient.prepareRedeem(
       CRT_VAULT_ADDRESS,
@@ -1687,10 +2076,15 @@ File: server/src/mcp.ts
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CrtClient } from "./crt.js";
-import { CRT_MINT, USDC_MINT } from "./config.js";
+import { CRT_MINT, CRT_VAULT_ADDRESS, USDC_MINT } from "./config.js";
 import { z } from "zod";
-import { logger } from "./utils.js";
+import { CRT_MCP_ERROR, logger } from "./utils.js";
 import packageJson from "../package.json" with { type: "json" };
+import {
+  CallToolResult,
+  ServerRequest,
+} from "@modelcontextprotocol/sdk/types.js";
+import { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 const { version } = packageJson;
 
 export class CarrotMcpServer {
@@ -1750,39 +2144,31 @@ export class CarrotMcpServer {
       },
     );
 
-    // mint crt
+    // issue crt
     this.server.tool(
-      "mint_crt",
+      "issue_crt",
       "Mints the Carrot Protocol token (CRT)",
       {
-        uiAmount: z.number().describe("The amount of USDC to use to mint CRT"),
+        uiAmount: z.number().describe("The amount of CRT to mint"),
         walletStr: z
           .string()
           .describe(
             "The wallet address to use to mint CRT, this must be the signer and this is the destination address for the minted CRT",
           ),
-        issueDirection: z
-          .string()
-          .describe(
-            "The direction of the issue, crt or usdc. For example am i issuing/mint 1 CRT or issuing/mint whatever i get with 1000 USDC",
-          ),
       },
       {
-        title: "Mint CRT",
+        title: "Issue CRT",
         description: "Mints the Carrot Protocol token (CRT)",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
       },
-      async ({ uiAmount, walletStr, issueDirection }, { sendRequest }) => {
+      async ({ uiAmount, walletStr }, { sendRequest }) => {
         try {
-          let selectedMint = USDC_MINT.toString();
-          if (issueDirection === "crt") {
-            selectedMint = CRT_MINT.toString();
-          }
+          // create unsigned tx
           const unsignedTx = await this.crtClient.getUnsignedIssueTx(
             uiAmount,
-            selectedMint,
+            { selectedMint: CRT_MINT.toString() },
             USDC_MINT.toString(),
             walletStr,
           );
@@ -1792,96 +2178,145 @@ export class CarrotMcpServer {
             inputMint: USDC_MINT.toString(),
           });
 
-          const elicitationResult = await sendRequest(
-            {
-              method: "elicitation/create",
-              params: {
-                message: `Please sign the transaction to mint CRT.`,
-                requestedSchema: {
-                  type: "object",
-                  properties: {
-                    unsignedTx: { type: "string" },
-                    signedTx: { type: "string" },
-                  },
-                  required: ["signedTx"],
-                },
-                prefilled: {
-                  unsignedTx,
-                },
-              },
-            },
-            // Define the expected response schema from the client
-            z.object({
-              action: z.literal("accept"),
-              content: z.object({
-                signedTx: z.string(),
-              }),
-            }),
+          // elicit signature and send tx
+          return await this.elicitAndSendTransaction(
+            unsignedTx,
+            sendRequest,
+            `Please sign the transaction to mint ${uiAmount} CRT`,
+            `Transaction to mint ${uiAmount} CRT was successful!`,
           );
-
-          // 2. Client returned the signed transaction, now send it.
-          logger.info(`Received signed transaction, sending to network...`);
-          const txSig = await this.crtClient.sendTx(
-            elicitationResult.content.signedTx,
-          );
-          logger.info(`tx sent`, { txSig });
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Transaction to mint CRT was successful! Signature: ${txSig}`,
-              },
-            ],
-          };
         } catch (e) {
           logger.error(`error creating mint tx`, { error: e });
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Error creating unsigned tx for minting CRT: ${e}`,
-              },
-            ],
-            isError: true,
-          };
+          return CRT_MCP_ERROR;
         }
       },
     );
 
-    // burn crt
+    // mint crt
     this.server.tool(
-      "burn_crt",
+      "issue_crt_with_usdc",
+      "Mints the Carrot Protocol token (CRT) specified in units of USDC",
+      {
+        uiAmount: z.number().describe("The amount of USDC to use to mint CRT"),
+        walletStr: z
+          .string()
+          .describe(
+            "The wallet address to use to mint CRT, this must be the signer and this is the destination address for the minted CRT",
+          ),
+      },
+      {
+        title: "Issue CRT with USDC",
+        description:
+          "Mints the Carrot Protocol token (CRT) specified in units of USDC",
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+      },
+      async ({ uiAmount, walletStr }, { sendRequest }) => {
+        try {
+          // create unsigned tx
+          const unsignedTx = await this.crtClient.getUnsignedIssueTx(
+            uiAmount,
+            { selectedMint: USDC_MINT.toString() },
+            USDC_MINT.toString(),
+            walletStr,
+          );
+          logger.info(`mint tx created`, {
+            uiAmount,
+            wallet: walletStr,
+            inputMint: USDC_MINT.toString(),
+          });
+
+          // elicit signature and send tx
+          return await this.elicitAndSendTransaction(
+            unsignedTx,
+            sendRequest,
+            `Please sign the transaction to mint ${uiAmount} CRT`,
+            `Transaction to mint ${uiAmount} CRT was successful!`,
+          );
+        } catch (e) {
+          logger.error(`error creating mint tx`, { error: e });
+          return CRT_MCP_ERROR;
+        }
+      },
+    );
+
+    // mint all crt
+    this.server.tool(
+      "issue_all_crt",
+      "Uses all of the USDC in the wallet to mint CRT",
+      {
+        walletStr: z
+          .string()
+          .describe(
+            "The wallet address to use to mint CRT, this must be the signer and this is the destination address for the minted CRT",
+          ),
+      },
+      {
+        title: "Issue all CRT",
+        description: "Uses all of the USDC in the wallet to mint CRT",
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+      },
+      async ({ walletStr }, { sendRequest }) => {
+        logger.info(`issue_all_crt start`, {
+          wallet: walletStr,
+        });
+        try {
+          const unsignedTx = await this.crtClient.getUnsignedIssueTx(
+            100,
+            { issueAll: true },
+            USDC_MINT.toString(),
+            walletStr,
+          );
+          logger.info(`issue all tx created`, {
+            wallet: walletStr,
+            inputMint: USDC_MINT.toString(),
+          });
+
+          return await this.elicitAndSendTransaction(
+            unsignedTx,
+            sendRequest,
+            `Please sign the transaction to issue all CRT`,
+            `Transaction to issue all CRT was successful!`,
+          );
+        } catch (e) {
+          logger.error(`error creating issue tx`, { error: e });
+          return CRT_MCP_ERROR;
+        }
+      },
+    );
+
+    // redeem crt
+    this.server.tool(
+      "redeem_crt_with_desired_crt_amount",
       "Burns the Carrot Protocol token (CRT) in exchange for USDC",
       {
-        uiAmount: z.number().describe("The amount of CRT to use to burn"),
+        uiAmount: z.number().describe("The amount of CRT to redeem"),
         walletStr: z
           .string()
           .describe(
             "The wallet address to use to burn CRT, this must be the signer and this is the destination address for the USDC",
           ),
-        redeemDirection: z
-          .string()
-          .describe(
-            "The direction of the redeem, crt or usdc. For example am i redeeming/burning 1 CRT or redeeming/burning 1000 usdc worth of crt",
-          ),
       },
       {
-        title: "Burn CRT",
+        title: "Redeem CRT with desired CRT amount",
         description:
-          "Burns the Carrot Protocol token (CRT) in exchange for USDC",
+          "Redeems the Carrot Protocol token (CRT) in exchange for USDC, burning CRT in the process",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
       },
-      async ({ uiAmount, walletStr, redeemDirection }, { sendRequest }) => {
+      async ({ uiAmount, walletStr }, { sendRequest }) => {
+        logger.info(`redeem_crt_with_desired_crt_amount start`, {
+          uiAmount,
+          wallet: walletStr,
+        });
         try {
-          let selectedMint = USDC_MINT.toString();
-          if (redeemDirection === "crt") {
-            selectedMint = CRT_MINT.toString();
-          }
           const unsignedTx = await this.crtClient.getUnsignedRedeemTx(
             uiAmount,
-            selectedMint,
+            { selectedMint: CRT_MINT.toString(), redeemAll: false },
             USDC_MINT.toString(),
             walletStr,
           );
@@ -1891,62 +2326,176 @@ export class CarrotMcpServer {
             outputMint: USDC_MINT.toString(),
           });
 
-          const elicitationResult = await sendRequest(
-            {
-              method: "elicitation/create",
-              params: {
-                message: `Please sign the transaction to burn CRT`,
-                requestedSchema: {
-                  type: "object",
-                  properties: {
-                    unsignedTx: { type: "string" },
-                    signedTx: { type: "string" },
-                  },
-                  required: ["signedTx"],
-                },
-                prefilled: {
-                  unsignedTx,
-                },
-              },
-            },
-            // Define the expected response schema from the client
-            z.object({
-              action: z.literal("accept"),
-              content: z.object({
-                signedTx: z.string(),
-              }),
-            }),
+          return await this.elicitAndSendTransaction(
+            unsignedTx,
+            sendRequest,
+            `Please sign the transaction to burn ${uiAmount} CRT`,
+            `Transaction to burn ${uiAmount} CRT was successful!`,
           );
-
-          // 2. Client returned the signed transaction, now send it.
-          logger.info(`Received signed transaction, sending to network...`);
-          const txSig = await this.crtClient.sendTx(
-            elicitationResult.content.signedTx,
-          );
-
-          logger.info(`tx sent`, { txSig });
-          return {
-            content: [
-              {
-                type: "text",
-                text: `burning ${uiAmount} CRT was successful! signature: ${txSig}`,
-              },
-            ],
-          };
         } catch (e) {
           logger.error(`error creating burn tx`, { error: e });
-          return {
-            content: [
-              {
-                type: "text",
-                text: `error burning CRT ${e}`,
-              },
-            ],
-            isError: true,
-          };
+          return CRT_MCP_ERROR;
         }
       },
     );
+
+    // redeem usdc
+    this.server.tool(
+      "redeem_crt_with_desired_usdc_amount",
+      "Redeems the Carrot Protocol token (CRT) in exchange for desired amount of USDC",
+      {
+        uiAmount: z
+          .number()
+          .describe(
+            "The amount of USDC you wish to receive, use any CRT amount to get the equivalent USDC amount",
+          ),
+        walletStr: z
+          .string()
+          .describe(
+            "The wallet address to use to burn CRT, this must be the signer and this is the destination address for the USDC",
+          ),
+      },
+      {
+        title: "Redeem CRT with desired USDC amount",
+        description:
+          "Redeems the Carrot Protocol token (CRT) in exchange for desired amount of USDC, burning CRT in the process",
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+      },
+      async ({ uiAmount, walletStr }, { sendRequest }) => {
+        try {
+          const unsignedTx = await this.crtClient.getUnsignedRedeemTx(
+            uiAmount,
+            { selectedMint: USDC_MINT.toString(), redeemAll: false },
+            USDC_MINT.toString(),
+            walletStr,
+          );
+          logger.info(`burn tx created`, {
+            uiAmount,
+            wallet: walletStr,
+            outputMint: USDC_MINT.toString(),
+          });
+
+          return await this.elicitAndSendTransaction(
+            unsignedTx,
+            sendRequest,
+            `Please sign the transaction to redeem ${uiAmount} USDC`,
+            `Transaction to redeem ${uiAmount} USDC was successful!`,
+          );
+        } catch (e) {
+          logger.error(`error creating burn tx`, { error: e });
+          return CRT_MCP_ERROR;
+        }
+      },
+    );
+
+    // redeem crt
+    this.server.tool(
+      "redeem_all_crt",
+      "Redeems all the Carrot Protocol token (CRT) in the wallet's ATA in exchange for USDC",
+      {
+        walletStr: z
+          .string()
+          .describe(
+            "The wallet address to use to burn CRT, this must be the signer and this is the destination address for the USDC",
+          ),
+      },
+      {
+        title: "Redeem CRT with desired CRT amount",
+        description:
+          "Redeems the Carrot Protocol token (CRT) in exchange for USDC, burning CRT in the process",
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+      },
+      async ({ walletStr }, { sendRequest }) => {
+        logger.info(`redeem_all_crt start`, {
+          wallet: walletStr,
+        });
+        try {
+          const unsignedTx = await this.crtClient.getUnsignedRedeemTx(
+            100,
+            { redeemAll: true }, // redeem all is true, dont need to specify the amount
+            USDC_MINT.toString(),
+            walletStr,
+          );
+          logger.info(`burn all tx created`, {
+            wallet: walletStr,
+            outputMint: USDC_MINT.toString(),
+          });
+
+          return await this.elicitAndSendTransaction(
+            unsignedTx,
+            sendRequest,
+            `Please sign the transaction to burn all CRT`,
+            `Transaction to burn all CRT was successful!`,
+          );
+        } catch (e) {
+          logger.error(`error creating burn tx`, { error: e });
+          return CRT_MCP_ERROR;
+        }
+      },
+    );
+  }
+
+  private async elicitAndSendTransaction(
+    unsignedTx: string,
+    sendRequest: (
+      req: ServerRequest,
+      resultSchema: z.ZodType<any>,
+      options?: RequestOptions,
+    ) => Promise<any>,
+    elicitationMessage: string,
+    successMessage: string,
+  ): Promise<CallToolResult> {
+    // 1. Elicit a signature from the client by sending the unsigned transaction
+    logger.info(`Requesting signature from client`, {
+      message: elicitationMessage,
+    });
+    const elicitationResult = await sendRequest(
+      {
+        method: "elicitation/create",
+        params: {
+          message: elicitationMessage,
+          requestedSchema: {
+            type: "object",
+            properties: {
+              unsignedTx: { type: "string" },
+              signedTx: { type: "string" },
+            },
+            required: ["signedTx"],
+          },
+          prefilled: {
+            unsignedTx,
+          },
+        },
+      },
+      // Define the expected response schema from the client
+      z.object({
+        action: z.literal("accept"),
+        content: z.object({
+          signedTx: z.string(),
+        }),
+      }),
+    );
+
+    // 2. Client returned the signed transaction, now send it to the network.
+    logger.info(`Received signed transaction, sending`);
+    const txSig = await this.crtClient.sendTx(
+      elicitationResult.content.signedTx,
+    );
+    logger.info(`Transaction sent successfully`, { txSig });
+
+    // 3. Return the success result to the user
+    return {
+      content: [
+        {
+          type: "text",
+          text: `${successMessage} Signature: ${txSig}`,
+        },
+      ],
+    };
   }
 }
 
@@ -1962,39 +2511,32 @@ import { CarrotMcpServer } from "./mcp.js";
 import packageJson from "../package.json" with { type: "json" };
 import { randomUUID } from "node:crypto";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import {
+  DynamoDbSessionManager,
+  getRemainingTtl,
+  InMemorySessionManager,
+  SessionManager,
+} from "./sessionManager.js";
+import { SESSION_TABLE_NAME, SESSION_TIMEOUT_MS } from "./config.js";
 const { version } = packageJson;
-const SESSION_TIMEOUT_MS = 1 * 60 * 1000; // 1 minute
 
 export class Router {
   private mcpServer: CarrotMcpServer;
-  private transports = new Map<string, StreamableHTTPServerTransport>();
-  private sessionTimeouts = new Map<string, NodeJS.Timeout>();
+  private sessionManager: SessionManager;
 
-  constructor() {
+  constructor(sessionManager: "memory" | "dynamodb") {
+    if (sessionManager === "dynamodb") {
+      this.sessionManager = new DynamoDbSessionManager(
+        SESSION_TABLE_NAME!,
+        SESSION_TIMEOUT_MS,
+      );
+    } else {
+      this.sessionManager = new InMemorySessionManager(SESSION_TIMEOUT_MS);
+    }
     logger.info(
       "Router initialized in stateful, multi-session mode with inactivity timeout.",
     );
     this.mcpServer = new CarrotMcpServer();
-  }
-
-  // --- NEW: Function to reset the inactivity timer for a session ---
-  private resetSessionTimeout(sessionId: string) {
-    // Clear any existing timer for this session
-    if (this.sessionTimeouts.has(sessionId)) {
-      clearTimeout(this.sessionTimeouts.get(sessionId));
-    }
-
-    // Set a new timer
-    const timeout = setTimeout(() => {
-      logger.info("Session timed out due to inactivity.", { sessionId });
-      const transport = this.transports.get(sessionId);
-      if (transport) {
-        transport.close(); // This will trigger the onclose handler
-      }
-      // The onclose handler will remove it from the maps
-    }, SESSION_TIMEOUT_MS);
-
-    this.sessionTimeouts.set(sessionId, timeout);
   }
 
   getIndex = (_req: Request, res: Response) => {
@@ -2009,35 +2551,38 @@ export class Router {
     let transport: StreamableHTTPServerTransport | undefined = undefined;
 
     if (sessionId) {
-      transport = this.transports.get(sessionId);
-      if (!transport) {
+      const sessionData = await this.sessionManager.getSession(sessionId);
+      if (!sessionData) {
         res.status(404).json({ error: "Session not found" });
         return;
       }
-      this.resetSessionTimeout(sessionId);
+      transport = sessionData.transport!;
+
+      // touch the session to reset the timeout
+      this.sessionManager.touchSession(sessionId);
     } else if (isInitializeRequest(req.body)) {
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (newSessionId) => {
+        onsessioninitialized: async (newSessionId) => {
+          const sessionData = await this.sessionManager.createSession(
+            newSessionId,
+            transport,
+          );
           logger.info(`New MCP session initialized`, {
-            sessionId: newSessionId,
+            sessionId: sessionData.sessionId,
+            ttl: sessionData.ttl,
+            createdAt: sessionData.updatedAt,
           });
-          this.transports.set(newSessionId, transport!);
-          // --- NEW: Start the inactivity timer for the new session ---
-          this.resetSessionTimeout(newSessionId);
         },
       });
 
-      transport.onclose = () => {
+      transport.onclose = async () => {
         if (transport?.sessionId) {
           const sid = transport.sessionId;
           logger.info("Session closed, removing transport and timeout.", {
             sessionId: sid,
           });
-          // --- NEW: Clean up both the transport and the timeout timer ---
-          this.transports.delete(sid);
-          clearTimeout(this.sessionTimeouts.get(sid));
-          this.sessionTimeouts.delete(sid);
+          await this.sessionManager.deleteSession(sid);
         }
       };
 
@@ -2056,8 +2601,240 @@ export class Router {
 
 
 ================================================
+File: server/src/sessionManager.ts
+================================================
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  DeleteCommand,
+} from "@aws-sdk/lib-dynamodb";
+import { logger } from "./utils.js";
+import { randomUUID } from "node:crypto";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+
+// --- DynamoDB Client Setup ---
+// The AWS SDK will automatically use credentials from the environment (e.g., IAM role).
+const dynamoClient = new DynamoDBClient({});
+const docClient = DynamoDBDocumentClient.from(dynamoClient);
+
+/**
+ * Represents the data stored for a session.
+ */
+export interface SessionData {
+  sessionId: string;
+  updatedAt: number;
+  ttl: number;
+  transport?: StreamableHTTPServerTransport;
+}
+
+export function getRemainingTtl(sessionData: SessionData): number {
+  return sessionData.ttl - sessionData.updatedAt;
+}
+
+/**
+ * Abstract class defining the interface for session management.
+ * This allows swapping implementations for local testing vs. production.
+ */
+export abstract class SessionManager {
+  /**
+   * Retrieves session data for a given session ID.
+   * @param sessionId The ID of the session to retrieve.
+   * @returns The session data, or undefined if not found.
+   */
+  abstract getSession(sessionId: string): Promise<SessionData | undefined>;
+
+  /**
+   * Creates a new session and returns its data.
+   * @returns The newly created session data.
+   */
+  abstract createSession(
+    sessionId: string,
+    transport?: StreamableHTTPServerTransport,
+  ): Promise<SessionData>;
+
+  /**
+   * Deletes a session.
+   * @param sessionId The ID of the session to delete.
+   */
+  abstract deleteSession(sessionId: string): Promise<void>;
+
+  /**
+   * "Touches" a session to update its last-accessed time and extend its lifetime (TTL).
+   * @param sessionId The ID of the session to update.
+   */
+  abstract touchSession(sessionId: string): Promise<void>;
+}
+
+/**
+ * In-memory implementation of SessionManager for local development and testing.
+ * It mimics the original stateful behavior of the router.
+ */
+export class InMemorySessionManager extends SessionManager {
+  private sessions = new Map<string, SessionData>();
+  private sessionTimeouts = new Map<string, NodeJS.Timeout>();
+  private readonly sessionTimeoutMs: number;
+  private transports = new Map<string, StreamableHTTPServerTransport>();
+
+  constructor(sessionTimeoutMs: number) {
+    super();
+    this.sessionTimeoutMs = sessionTimeoutMs;
+    this.transports = new Map<string, StreamableHTTPServerTransport>();
+    logger.info("Using InMemorySessionManager for session storage.", {
+      sessionTimeoutMs,
+    });
+  }
+
+  private resetSessionTimeout(sessionId: string) {
+    if (this.sessionTimeouts.has(sessionId)) {
+      clearTimeout(this.sessionTimeouts.get(sessionId));
+    }
+    const timeout = setTimeout(() => {
+      logger.info("In-memory session timed out due to inactivity.", {
+        sessionId,
+      });
+      this.deleteSession(sessionId);
+    }, this.sessionTimeoutMs);
+    this.sessionTimeouts.set(sessionId, timeout);
+  }
+
+  async getSession(sessionId: string): Promise<SessionData | undefined> {
+    return this.sessions.get(sessionId);
+  }
+
+  async createSession(sessionId: string): Promise<SessionData> {
+    const now = new Date().getTime();
+    const session: SessionData = {
+      sessionId,
+      updatedAt: now,
+      ttl: now + this.sessionTimeoutMs,
+    };
+    this.sessions.set(sessionId, session);
+    this.resetSessionTimeout(sessionId);
+    logger.info("New in-memory session created", { sessionId });
+    return session;
+  }
+
+  async deleteSession(sessionId: string): Promise<void> {
+    this.sessions.delete(sessionId);
+    const timeout = this.sessionTimeouts.get(sessionId);
+    if (timeout) {
+      clearTimeout(timeout);
+      this.sessionTimeouts.delete(sessionId);
+    }
+    logger.info("In-memory session deleted", { sessionId });
+  }
+
+  async touchSession(sessionId: string): Promise<void> {
+    this.resetSessionTimeout(sessionId);
+  }
+}
+
+/**
+ * DynamoDB implementation of SessionManager for production environments.
+ */
+export class DynamoDbSessionManager extends SessionManager {
+  private readonly tableName: string;
+  private readonly sessionTimeoutMs: number;
+
+  constructor(tableName: string, sessionTimeoutMs: number) {
+    super();
+    this.tableName = tableName;
+    this.sessionTimeoutMs = sessionTimeoutMs;
+    logger.info("Using DynamoDbSessionManager for session storage.", {
+      tableName,
+      sessionTimeoutMs,
+    });
+  }
+
+  async getSession(sessionId: string): Promise<SessionData | undefined> {
+    try {
+      const { Item } = await docClient.send(
+        new GetCommand({
+          TableName: this.tableName,
+          Key: { sessionId },
+        }),
+      );
+      return Item as SessionData | undefined;
+    } catch (error) {
+      logger.error("DynamoDB getSession failed", { sessionId, error });
+      return undefined;
+    }
+  }
+
+  async createSession(sessionId: string): Promise<SessionData> {
+    const now = new Date().getTime();
+    const session: SessionData = {
+      sessionId,
+      updatedAt: now,
+      ttl: now + this.sessionTimeoutMs,
+    };
+
+    try {
+      await docClient.send(
+        new PutCommand({
+          TableName: this.tableName,
+          Item: session,
+        }),
+      );
+      logger.info("New session created in DynamoDB", {
+        sessionId,
+      });
+      return session;
+    } catch (error) {
+      logger.error("Failed to create session in DynamoDB", { error });
+      throw new Error("Failed to create session in backend store.");
+    }
+  }
+
+  async deleteSession(sessionId: string): Promise<void> {
+    try {
+      await docClient.send(
+        new DeleteCommand({
+          TableName: this.tableName,
+          Key: { sessionId },
+        }),
+      );
+      logger.info("DynamoDB session deleted", { sessionId });
+    } catch (error) {
+      logger.error("Failed to delete session from DynamoDB", {
+        sessionId,
+        error,
+      });
+    }
+  }
+
+  async touchSession(sessionId: string): Promise<void> {
+    const now = new Date().getTime();
+    const newTtl = now + this.sessionTimeoutMs;
+    const updatedSession = {
+      sessionId,
+      updatedAt: now,
+      ttl: newTtl,
+    };
+    try {
+      await docClient.send(
+        new PutCommand({
+          TableName: this.tableName,
+          Item: updatedSession,
+        }),
+      );
+    } catch (error) {
+      logger.error("Failed to touch session in DynamoDB", {
+        sessionId,
+        error,
+      });
+    }
+  }
+}
+
+
+
+================================================
 File: server/src/utils.ts
 ================================================
+import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import winston from "winston";
 
 // Base logger configuration
@@ -2082,6 +2859,17 @@ export const logger = winston.createLogger({
   ...loggerConfig,
   defaultMeta: { service: "carrot-mcp-server" },
 });
+
+// generic error message for tool calls
+export const CRT_MCP_ERROR: CallToolResult = {
+  content: [
+    {
+      type: "text",
+      text: "An error occurred while processing your request. Please try again.",
+    },
+  ],
+  isError: true,
+};
 
 
 

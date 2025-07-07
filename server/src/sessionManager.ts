@@ -7,7 +7,6 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { logger } from "./utils.js";
 import { randomUUID } from "node:crypto";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 // --- DynamoDB Client Setup ---
 // The AWS SDK will automatically use credentials from the environment (e.g., IAM role).
@@ -66,12 +65,10 @@ export class InMemorySessionManager extends SessionManager {
   private sessions = new Map<string, SessionData>();
   private sessionTimeouts = new Map<string, NodeJS.Timeout>();
   private readonly sessionTimeoutMs: number;
-  private transports = new Map<string, StreamableHTTPServerTransport>();
 
   constructor(sessionTimeoutMs: number) {
     super();
     this.sessionTimeoutMs = sessionTimeoutMs;
-    this.transports = new Map<string, StreamableHTTPServerTransport>();
     logger.info("Using InMemorySessionManager for session storage.", {
       sessionTimeoutMs,
     });
@@ -95,10 +92,11 @@ export class InMemorySessionManager extends SessionManager {
   }
 
   async createSession(sessionId: string): Promise<SessionData> {
+    const now = new Date().getTime();
     const session: SessionData = {
       sessionId,
-      updatedAt: Math.floor(Date.now()),
-      ttl: Math.floor(Date.now()) + this.sessionTimeoutMs,
+      updatedAt: now,
+      ttl: now + this.sessionTimeoutMs,
     };
     this.sessions.set(sessionId, session);
     this.resetSessionTimeout(sessionId);
@@ -154,10 +152,11 @@ export class DynamoDbSessionManager extends SessionManager {
   }
 
   async createSession(sessionId: string): Promise<SessionData> {
+    const now = new Date().getTime();
     const session: SessionData = {
       sessionId,
-      updatedAt: Math.floor(Date.now() / 1000),
-      ttl: Math.floor(Date.now() / 1000) + this.sessionTimeoutMs,
+      updatedAt: now,
+      ttl: now + this.sessionTimeoutMs,
     };
 
     try {
@@ -195,10 +194,11 @@ export class DynamoDbSessionManager extends SessionManager {
   }
 
   async touchSession(sessionId: string): Promise<void> {
-    const newTtl = Math.floor(Date.now() / 1000) + this.sessionTimeoutMs;
+    const now = new Date().getTime();
+    const newTtl = now + this.sessionTimeoutMs;
     const updatedSession = {
       sessionId,
-      createdAt: new Date().toISOString(),
+      updatedAt: now,
       ttl: newTtl,
     };
     try {

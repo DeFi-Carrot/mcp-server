@@ -18,13 +18,16 @@ export const USDC_MINT = new web3.PublicKey(
 
 // default to memory session manager
 export const SESSION_MANAGER =
-  (process.env.SESSION_MANAGER! as "memory" | "dynamodb") ?? "memory";
+  (process.env.SESSION_MANAGER?.toString() as "memory" | "dynamodb") ??
+  "memory";
 
 // for dynamodb session manager
 export const SESSION_TABLE_NAME: string | undefined =
   process.env.SESSION_TABLE_NAME?.toString();
 
-export const SESSION_TIMEOUT_MS = Number(process.env.SESSION_TIMEOUT_MS!);
+export const SESSION_TIMEOUT_MS = Number(
+  process.env.SESSION_TIMEOUT_MS ?? 86000 * 1000, // default 24 hours
+);
 
 // standard mcp session id header
 export const MCP_SESSION_ID_HEADER = "mcp-session-id";

@@ -2,13 +2,14 @@ import express from "express";
 import { Router } from "./router.js";
 import { logger } from "./utils.js";
 import packageJson from "../package.json" with { type: "json" };
+import { SESSION_MANAGER } from "./config.js";
 const { version } = packageJson;
 
 export class Api {
   private app: express.Express;
 
   constructor() {
-    const router = new Router();
+    const router = new Router(SESSION_MANAGER);
     const app = express();
 
     app.use(express.json());
