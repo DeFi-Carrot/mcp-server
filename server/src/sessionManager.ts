@@ -6,12 +6,6 @@ import {
   DeleteCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { logger } from "./utils.js";
-import { randomUUID } from "node:crypto";
-
-// --- DynamoDB Client Setup ---
-// The AWS SDK will automatically use credentials from the environment (e.g., IAM role).
-const dynamoClient = new DynamoDBClient({});
-const docClient = DynamoDBDocumentClient.from(dynamoClient);
 
 /**
  * Represents the data stored for a session.
@@ -22,7 +16,12 @@ export interface SessionData {
   ttl: number;
 }
 
-export function getRemainingTtl(sessionData: SessionData): number {
+/**
+ * Returns the remaining time to live for a session.
+ * @param sessionData The session data.
+ * @returns The remaining time to live in milliseconds.
+ */
+export function getRemainingSessionTtl(sessionData: SessionData): number {
   return sessionData.ttl - sessionData.updatedAt;
 }
 
@@ -125,11 +124,14 @@ export class InMemorySessionManager extends SessionManager {
 export class DynamoDbSessionManager extends SessionManager {
   private readonly tableName: string;
   private readonly sessionTimeoutMs: number;
+  private readonly docClient: DynamoDBDocumentClient;
 
   constructor(tableName: string, sessionTimeoutMs: number) {
     super();
     this.tableName = tableName;
     this.sessionTimeoutMs = sessionTimeoutMs;
+    this.docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+
     logger.info("Using DynamoDbSessionManager for session storage.", {
       tableName,
       sessionTimeoutMs,
@@ -138,7 +140,7 @@ export class DynamoDbSessionManager extends SessionManager {
 
   async getSession(sessionId: string): Promise<SessionData | undefined> {
     try {
-      const { Item } = await docClient.send(
+      const { Item } = await this.docClient.send(
         new GetCommand({
           TableName: this.tableName,
           Key: { sessionId },
@@ -160,7 +162,7 @@ export class DynamoDbSessionManager extends SessionManager {
     };
 
     try {
-      await docClient.send(
+      await this.docClient.send(
         new PutCommand({
           TableName: this.tableName,
           Item: session,
@@ -178,7 +180,7 @@ export class DynamoDbSessionManager extends SessionManager {
 
   async deleteSession(sessionId: string): Promise<void> {
     try {
-      await docClient.send(
+      await this.docClient.send(
         new DeleteCommand({
           TableName: this.tableName,
           Key: { sessionId },
@@ -202,7 +204,7 @@ export class DynamoDbSessionManager extends SessionManager {
       ttl: newTtl,
     };
     try {
-      await docClient.send(
+      await this.docClient.send(
         new PutCommand({
           TableName: this.tableName,
           Item: updatedSession,

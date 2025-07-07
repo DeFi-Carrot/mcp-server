@@ -7,7 +7,6 @@ import { randomUUID } from "node:crypto";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import {
   DynamoDbSessionManager,
-  getRemainingTtl,
   InMemorySessionManager,
   SessionManager,
 } from "./sessionManager.js";
