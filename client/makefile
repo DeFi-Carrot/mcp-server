@@ -16,3 +16,9 @@ fmt:
 
 fmt_check:
 	npm run fmt:check
+
+local:
+	npm run local
+
+prod:
+	npm run prod
