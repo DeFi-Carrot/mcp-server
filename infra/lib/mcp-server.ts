@@ -28,7 +28,7 @@ export class McpServer extends cdk.Stack {
       {
         repositoryName: `${id.toLowerCase()}-repo`,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
-        emptyOnDelete: true,
+        autoDeleteImages: true,
       },
     );
 
