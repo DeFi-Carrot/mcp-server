@@ -76,6 +76,7 @@ export class McpServer extends cdk.Stack {
     const logGroupName = `/ecs/${id}-container`;
     const logGroup = new cdk.aws_logs.LogGroup(this, `${id}LogGroup`, {
       retention: cdk.aws_logs.RetentionDays.ONE_DAY,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
       logGroupName,
     });
 

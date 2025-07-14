@@ -1,4 +1,4 @@
 node_modules/
 build/
 user1.json
-
+.env*
