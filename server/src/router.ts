@@ -6,7 +6,7 @@ import packageJson from "../package.json" with { type: "json" };
 import { randomUUID } from "node:crypto";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 const { version } = packageJson;
-const SESSION_TIMEOUT_MS = 1 * 60 * 1000; // 1 minute
+const SESSION_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export class Router {
   private mcpServer: CarrotMcpServer;
@@ -20,7 +20,7 @@ export class Router {
     this.mcpServer = new CarrotMcpServer();
   }
 
-  // --- NEW: Function to reset the inactivity timer for a session ---
+  // reset the inactivity timer for a session
   private resetSessionTimeout(sessionId: string) {
     // Clear any existing timer for this session
     if (this.sessionTimeouts.has(sessionId)) {

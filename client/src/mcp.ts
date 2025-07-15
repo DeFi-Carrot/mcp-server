@@ -10,9 +10,17 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { MODEL_NAME } from "./config.js";
 import { web3 } from "@coral-xyz/anchor";
 import {
-  ElicitRequest,
   ElicitRequestSchema,
-  ElicitResult,
+  GetPromptRequest,
+  GetPromptResultSchema,
+  ListPromptsRequest,
+  ListPromptsResultSchema,
+  Prompt,
+  ReadResourceRequest,
+  ReadResourceResultSchema,
+  Resource,
+  ListResourcesRequest,
+  ListResourcesResultSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import fs from "fs";
 
@@ -49,24 +57,36 @@ export class CarrotMcpClient {
 
     // handler dispatching
     this.mcpClient.setRequestHandler(ElicitRequestSchema, async (request) => {
-      const { requestedSchema } = request.params;
+      const { message, prefilled } = request.params;
+      logger.info(`Handling signing request`, { message });
 
-      // --- Dispatcher Logic ---
-      // Check the schema to identify the type of request.
-
-      // 1. Is this a request for a transaction signature?
-      // We check if the schema is asking for a `signedTx` property.
-      if (requestedSchema.properties?.signedTx) {
-        return this.handleSigningRequest(request);
+      const unsignedTx = (prefilled as any).unsignedTx as string;
+      if (!unsignedTx) {
+        const errMsg =
+          "Signing request did not provide an unsigned transaction.";
+        logger.error(errMsg);
+        return { action: "reject" };
       }
+      logger.info(`parsed unsigned tx`);
 
-      // --- Fallback for unknown requests ---
-      logger.warn("Received an unsupported elicitation request", {
-        schema: requestedSchema,
-      });
-      return {
-        action: "decline",
-      };
+      try {
+        const signedTx = this.signTx(unsignedTx);
+        logger.info("Transaction signed successfully for request.", {
+          message,
+        });
+
+        return {
+          action: "accept",
+          content: {
+            signedTx: signedTx,
+          },
+        };
+      } catch (e) {
+        logger.error("Failed to sign transaction", { error: e });
+        return {
+          action: "reject",
+        };
+      }
     });
   }
 
@@ -76,7 +96,6 @@ export class CarrotMcpClient {
       new StreamableHTTPClientTransport(this.mcpServerUrl),
     );
 
-    // fetch the tools from the server
     logger.info("Fetching tools from server");
     const toolsResult = await this.mcpClient.listTools();
     this.tools = toolsResult.tools.map((tool) => {
@@ -92,51 +111,118 @@ export class CarrotMcpClient {
     });
   }
 
-  async processQuery(query: string) {
+  async listResources(): Promise<Resource[]> {
+    logger.info("Listing available resources...");
+    const request: ListResourcesRequest = {
+      method: "resources/list",
+      params: {},
+    };
+    const result = await this.mcpClient.request(
+      request,
+      ListResourcesResultSchema,
+    );
+    return result.resources;
+  }
+
+  async readResource(uri: string): Promise<string> {
+    logger.info(`Reading resource: ${uri}`);
+    const request: ReadResourceRequest = {
+      method: "resources/read",
+      params: { uri },
+    };
+    const result = await this.mcpClient.request(
+      request,
+      ReadResourceResultSchema,
+    );
+    return result.contents
+      .map((c) => (c as { text: string }).text)
+      .join("\n---\n");
+  }
+
+  async listPrompts(): Promise<Prompt[]> {
+    logger.info("Listing available prompts...");
+    const request: ListPromptsRequest = {
+      method: "prompts/list",
+      params: {},
+    };
+    const result = await this.mcpClient.request(
+      request,
+      ListPromptsResultSchema,
+    );
+    return result.prompts;
+  }
+
+  async getPrompt(name: string, args: Record<string, string>): Promise<string> {
+    logger.info(`Getting prompt '${name}' with args:`, args);
+    const request: GetPromptRequest = {
+      method: "prompts/get",
+      params: { name, arguments: args },
+    };
+    const result = await this.mcpClient.request(request, GetPromptResultSchema);
+    const firstUserMessage = result.messages.find((m) => m.role === "user");
+    if (firstUserMessage && firstUserMessage.content.type === "text") {
+      return firstUserMessage.content.text;
+    }
+    return "Could not generate a query from the prompt.";
+  }
+
+  async processQuery(query: string): Promise<string> {
+    // --- RAG IMPLEMENTATION ---
+    // 1. Retrieve the protocol summary resource to provide context to the LLM.
+    const summaryContext = await this.readResource("carrot-protocol://summary");
+
+    // 2. Construct the prompt with the retrieved context.
+    // This ensures the LLM has the correct information before it tries to answer.
+    const augmentedQuery = `
+Here is some context about the Carrot Protocol:
+---
+${summaryContext}
+---
+Now, please answer the following user query: "${query}"
+`;
+
     const messages: MessageParam[] = [
       {
         role: "user",
-        content: query,
+        content: augmentedQuery, // Use the augmented query
       },
     ];
 
-    logger.info("Processing query with Claude", { query });
+    logger.info("Processing augmented query with Claude", { query });
 
-    // === LLM Turn 1: Decide which tool to use ===
     const initialResponse = await this.modelClient.messages.create({
       model: MODEL_NAME,
-      max_tokens: 100,
+      max_tokens: 1024,
       messages,
       tools: this.tools,
     });
 
-    // Append the assistant's response (including the tool_use request) to the message history
     messages.push({
       role: "assistant",
       content: initialResponse.content,
     });
 
-    // Check if the model wants to use a tool
     const toolUseContent = initialResponse.content.find(
       (content) => content.type === "tool_use",
     );
 
     if (toolUseContent && toolUseContent.type === "tool_use") {
       const toolName = toolUseContent.name;
-      let toolArgs = toolUseContent.input as any;
-      logger.info("tool call requested", {
+      const toolArgs = (toolUseContent.input as any) || {};
+      logger.info("Tool call requested", {
         toolName,
         toolArgs,
       });
 
-      // Find the tool's schema from the list we fetched on connection
       const toolSchema = this.tools.find((t) => t.name === toolName)!;
 
-      // Check if the schema requires a 'walletStr' and if it's not already provided
-      if ((toolSchema.input_schema.properties as any).walletStr) {
+      if (
+        toolSchema.input_schema.properties &&
+        (toolSchema.input_schema.properties as any).walletStr
+      ) {
         const walletStr = this.signer.publicKey.toString();
         toolArgs.walletStr = walletStr;
-        logger.info(`injecting wallet address for tool`, {
+        logger.info(`Injecting wallet address for tool`, {
           tool: toolName,
           args: toolArgs,
         });
@@ -147,7 +233,6 @@ export class CarrotMcpClient {
         arguments: toolArgs,
       });
 
-      // Extract the text from the tool result
       const toolOutputText = (
         toolResult.content as { text?: string }[] | undefined
       )?.[0]?.text;
@@ -157,32 +242,28 @@ export class CarrotMcpClient {
 
       logger.info("Tool executed", { result: toolOutputText });
 
-      // === LLM Turn 2: Send the tool result back to the model ===
       messages.push({
         role: "user",
         content: [
           {
             type: "tool_result",
             tool_use_id: toolUseContent.id,
-            content: toolOutputText, // Pass the extracted text string here
+            content: toolOutputText,
           },
         ],
       });
 
-      // Get the final response from the model
       const finalResponse = await this.modelClient.messages.create({
         model: MODEL_NAME,
-        max_tokens: 100,
-        messages, // Send the full conversation history
+        max_tokens: 1024,
+        messages,
         tools: this.tools,
       });
 
-      // Assuming the final response is text
       return finalResponse.content[0].type === "text"
         ? finalResponse.content[0].text
         : "The model did not return a text response.";
     } else if (initialResponse.content[0].type === "text") {
-      // If no tool was used, just return the initial text response
       logger.info("Claude responded directly without using a tool.");
       return initialResponse.content[0].text;
     }
@@ -190,53 +271,13 @@ export class CarrotMcpClient {
     return "An unexpected response format was received from the model.";
   }
 
-  /**
-   * Signs a base64 encoded transaction.
-   *
-   * @param unsignedTx - The base64 encoded unsigned transaction from the server.
-   * @returns A base64 encoded signed transaction string.
-   */
   private signTx(unsignedTx: string): string {
     const tx = web3.VersionedTransaction.deserialize(
       Buffer.from(unsignedTx, "base64"),
     );
     tx.sign([this.signer]);
-
     const signedTx = tx.serialize();
-
     return Buffer.from(signedTx).toString("base64");
-  }
-
-  private async handleSigningRequest(
-    request: ElicitRequest,
-  ): Promise<ElicitResult> {
-    const { message, prefilled } = request.params;
-    logger.info(`Handling signing request`, { message });
-
-    const unsignedTx = (prefilled as any).unsignedTx as string;
-    if (!unsignedTx) {
-      const errMsg = "Signing request did not provide an unsigned transaction.";
-      logger.error(errMsg);
-      return { action: "reject" };
-    }
-    logger.info(`parsed unsigned tx`);
-
-    try {
-      const signedTx = this.signTx(unsignedTx);
-      logger.info("Transaction signed successfully for request.", { message });
-
-      return {
-        action: "accept",
-        content: {
-          signedTx: signedTx,
-        },
-      };
-    } catch (e) {
-      logger.error("Failed to sign transaction", { error: e });
-      return {
-        action: "reject",
-      };
-    }
   }
 }
 

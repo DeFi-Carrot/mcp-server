@@ -57,44 +57,10 @@ File: README.md
 
 general mcp server for carrot
 
+## TODO
 
-## setup
-
-```bash
-# required for now until claude natively supports remote MCP servers (i think it should be soon)
-npm install -g mcp-remote
-
-# get path of node and add to PATH env, we need to ensure we are using an up to date version
-which node
-
-# update claude config
-vim ~/Library/Application\ Support/Claude/claude_desktop_config.json
-```
-
-```json
-"carrot": {
-  "command": "mcp-remote",
-  "args": [
-    "http://localhost:8080/mcp",
-    "--allow-http"
-  ],
-  "env": {
-    "PATH": "/Users/jack/.nvm/versions/node/v22.4.0/bin"
-  }
-}
-```
-
-```json
-"carrot": {
-  "command": "mcp-remote",
-  "args": [
-    "https://mcp.deficarrot.com/mcp"
-  ],
-  "env": {
-    "PATH": "/Users/jack/.nvm/versions/node/v22.4.0/bin"
-  }
-}
-```
+- sticky sessions on alb
+- do operations where user must accept (like signing a tx)
 
 
 
@@ -178,11 +144,10 @@ export const ANTHROPIC_MODEL_API_KEY = process.env.ANTHROPIC_MODEL_API_KEY.toStr
 ================================================
 File: client/build/index.js
 ================================================
-import { MCP_SERVER_URL } from "./config.js";
+import { ANTHROPIC_MODEL_API_KEY, MCP_SERVER_URL } from "./config.js";
 import { CarrotMcpClient } from "./mcp.js";
 async function main() {
-    const modelApiKey = "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";
-    const client = new CarrotMcpClient(modelApiKey, MCP_SERVER_URL, "user1.json");
+    const client = new CarrotMcpClient(ANTHROPIC_MODEL_API_KEY, MCP_SERVER_URL, "user1.json");
     await client.connectToMcpServer();
     const response = await client.processQuery("redeem all of my crt");
     console.log(response);
@@ -419,21 +384,23 @@ export const MODEL_NAME = "claude-3-haiku-20240307";
 // read from env var and just check if it's a valid url
 export const MCP_SERVER_URL = process.env.MCP_SERVER_URL!.toString();
 
-export const ANTHROPIC_MODEL_API_KEY = process.env.ANTHROPIC_MODEL_API_KEY!.toString();
+export const ANTHROPIC_MODEL_API_KEY =
+  process.env.ANTHROPIC_MODEL_API_KEY!.toString();
 
 
 
 ================================================
 File: client/src/index.ts
 ================================================
-import { MCP_SERVER_URL } from "./config.js";
+import { ANTHROPIC_MODEL_API_KEY, MCP_SERVER_URL } from "./config.js";
 import { CarrotMcpClient } from "./mcp.js";
 
 async function main() {
-  const modelApiKey =
-    "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";
-
-  const client = new CarrotMcpClient(modelApiKey, MCP_SERVER_URL, "user1.json");
+  const client = new CarrotMcpClient(
+    ANTHROPIC_MODEL_API_KEY,
+    MCP_SERVER_URL,
+    "user1.json",
+  );
 
   await client.connectToMcpServer();
 
@@ -806,7 +773,7 @@ export class McpServer extends cdk.Stack {
       {
         repositoryName: `${id.toLowerCase()}-repo`,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
-        emptyOnDelete: true,
+        autoDeleteImages: true,
       },
     );
 
@@ -1497,7 +1464,7 @@ import packageJson from "../package.json" with { type: "json" };
 import { randomUUID } from "node:crypto";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 const { version } = packageJson;
-const SESSION_TIMEOUT_MS = 1 * 60 * 1000; // 1 minute
+const SESSION_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 export class Router {
     mcpServer;
     transports = new Map();
@@ -2284,7 +2251,7 @@ import packageJson from "../package.json" with { type: "json" };
 import { randomUUID } from "node:crypto";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 const { version } = packageJson;
-const SESSION_TIMEOUT_MS = 1 * 60 * 1000; // 1 minute
+const SESSION_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export class Router {
   private mcpServer: CarrotMcpServer;
