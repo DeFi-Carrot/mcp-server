@@ -13,6 +13,7 @@
     "start": "node build/index.js",
     "fmt": "prettier --write src/",
     "fmt:check": "prettier --check src/",
+    "inspect": "npx @modelcontextprotocol/inspector",
     "docker:build": "docker build -t carrot-mcp-server .",
     "docker:tag": "docker tag carrot-mcp-server:latest 058264184558.dkr.ecr.us-east-2.amazonaws.com/carrotmcpserver-repo:latest",
     "docker:push": "aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin 058264184558.dkr.ecr.us-east-2.amazonaws.com && docker push 058264184558.dkr.ecr.us-east-2.amazonaws.com/carrotmcpserver-repo:latest"
@@ -35,6 +36,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@modelcontextprotocol/inspector": "^0.16.1",
     "@types/express": "^5.0.3",
     "@types/node": "^20.12.12",
     "prettier": "^3.3.2",
