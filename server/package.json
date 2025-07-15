@@ -1,6 +1,6 @@
 {
   "name": "@carrot/mcp-server",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "An MCP server for the Carrot Protocol.",
   "main": "index.js",
   "type": "module",

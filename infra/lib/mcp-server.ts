@@ -149,7 +149,7 @@ export class McpServer extends cdk.Stack {
     });
 
     // forward 443 to 80
-    httpsListener.addTargets(`${id}EcsTarget`, {
+    const targetGroup = httpsListener.addTargets(`${id}EcsTarget`, {
       port: 80,
       targets: [ecsService],
       healthCheck: {
@@ -157,6 +157,24 @@ export class McpServer extends cdk.Stack {
         interval: cdk.Duration.seconds(30),
       },
     });
+
+    // Enable sticky sessions on the target group (24 hours duration)
+    const STICKY_SESSION_DURATION_SECONDS = 24 * 60 * 60;
+    const cfnTargetGroup = targetGroup.node.defaultChild as cdk.aws_elasticloadbalancingv2.CfnTargetGroup;
+    cfnTargetGroup.targetGroupAttributes = [
+      {
+        key: "stickiness.enabled",
+        value: "true",
+      },
+      {
+        key: "stickiness.type",
+        value: "lb_cookie",
+      },
+      {
+        key: "stickiness.lb_cookie.duration_seconds",
+        value: STICKY_SESSION_DURATION_SECONDS.toString(),
+      },
+    ];
 
     // redirect 80 to 443
     alb.addListener(`${id}HttpListener`, {

@@ -91,12 +91,12 @@ export class CarrotMcpClient {
   }
 
   async connectToMcpServer() {
-    logger.info("Connecting to MCP server", { url: this.mcpServerUrl });
+    logger.debug("Connecting to MCP server", { url: this.mcpServerUrl });
     await this.mcpClient.connect(
       new StreamableHTTPClientTransport(this.mcpServerUrl),
     );
 
-    logger.info("Fetching tools from server");
+    logger.debug("Fetching tools from server");
     const toolsResult = await this.mcpClient.listTools();
     this.tools = toolsResult.tools.map((tool) => {
       return {
@@ -105,14 +105,14 @@ export class CarrotMcpClient {
         input_schema: tool.inputSchema,
       };
     });
-    logger.info("Connected to server with tools", {
+    logger.debug("Connected to server with tools", {
       toolCount: this.tools.length,
       tools: this.tools.map(({ name }) => name),
     });
   }
 
   async listResources(): Promise<Resource[]> {
-    logger.info("Listing available resources...");
+    logger.debug("Listing available resources...");
     const request: ListResourcesRequest = {
       method: "resources/list",
       params: {},
@@ -125,7 +125,7 @@ export class CarrotMcpClient {
   }
 
   async readResource(uri: string): Promise<string> {
-    logger.info(`Reading resource: ${uri}`);
+    logger.debug(`Reading resource: ${uri}`);
     const request: ReadResourceRequest = {
       method: "resources/read",
       params: { uri },
@@ -140,7 +140,7 @@ export class CarrotMcpClient {
   }
 
   async listPrompts(): Promise<Prompt[]> {
-    logger.info("Listing available prompts...");
+    logger.debug("Listing available prompts...");
     const request: ListPromptsRequest = {
       method: "prompts/list",
       params: {},
@@ -166,13 +166,18 @@ export class CarrotMcpClient {
     return "Could not generate a query from the prompt.";
   }
 
+  async listTools(): Promise<Tool[]> {
+    logger.debug("Listing available tools from memory", {
+      toolCount: this.tools.length,
+    });
+    return this.tools;
+  }
+
   async processQuery(query: string): Promise<string> {
-    // --- RAG IMPLEMENTATION ---
-    // 1. Retrieve the protocol summary resource to provide context to the LLM.
+    // read the protocol summary resource to provide context to the LLM
     const summaryContext = await this.readResource("carrot-protocol://summary");
 
-    // 2. Construct the prompt with the retrieved context.
-    // This ensures the LLM has the correct information before it tries to answer.
+    // augment the query with the context
     const augmentedQuery = `
 Here is some context about the Carrot Protocol:
 ---
@@ -184,15 +189,15 @@ Now, please answer the following user query: "${query}"
     const messages: MessageParam[] = [
       {
         role: "user",
-        content: augmentedQuery, // Use the augmented query
+        content: augmentedQuery,
       },
     ];
 
-    logger.info("Processing augmented query with Claude", { query });
+    logger.debug("Processing augmented query", { query });
 
     const initialResponse = await this.modelClient.messages.create({
       model: MODEL_NAME,
-      max_tokens: 1024,
+      max_tokens: 400,
       messages,
       tools: this.tools,
     });
@@ -240,7 +245,7 @@ Now, please answer the following user query: "${query}"
         throw new Error("Tool call did not return text content.");
       }
 
-      logger.info("Tool executed", { result: toolOutputText });
+      logger.debug("Tool executed", { result: toolOutputText });
 
       messages.push({
         role: "user",
