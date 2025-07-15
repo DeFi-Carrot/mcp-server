@@ -74,10 +74,9 @@ async function main() {
         break;
 
       case "list-tools":
-        // The tools are fetched on connection, but we can re-list them if needed.
-        // For this client, we'll just log what we have.
-        // A more robust client might re-fetch with `client.mcpClient.listTools()`
-        console.log("Tools are fetched upon connection.");
+        const tools = await client.listTools();
+        console.log("\nAvailable Tools:");
+        tools.forEach((r) => console.log(`- ${r.name}: ${r.description}`));
         break;
 
       case "get-prompt":
