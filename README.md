@@ -21,16 +21,6 @@ This project provides a bridge between Claude AI and the Carrot Protocol, allowi
 └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
 ```
 
-## Repository Structure
-
-```
-mcp-server/
-├── server/          # MCP Server - Express.js backend
-├── client/          # Interactive CLI with Claude AI
-├── infra/           # AWS CDK infrastructure
-└── llm/             # LLM configuration files
-```
-
 ## Quick Start
 
 ### Prerequisites
@@ -40,18 +30,7 @@ mcp-server/
 - Solana keypair (JSON file) for signing transactions
 - Anthropic API key
 
-### Server Setup
-
-```bash
-cd server
-npm install
-npm run build
-npm start
-```
-
-The server starts on `http://localhost:8080`.
-
-### Client Setup
+### Setup
 
 ```bash
 cd client
@@ -59,14 +38,7 @@ npm install
 npm run build
 ```
 
-Create a `.env.local` file for local development:
-
-```env
-MCP_SERVER_URL=http://localhost:8080/mcp
-ANTHROPIC_MODEL_API_KEY=your-anthropic-api-key
-```
-
-Or use the production server:
+Create a `.env.local` file:
 
 ```env
 MCP_SERVER_URL=https://mcp.deficarrot.com/mcp
@@ -120,61 +92,15 @@ Once the client is running, you can use these commands:
 | `redeem_crt_for_usdc` | Redeem to get specific USDC amount |
 | `redeem_all_crt` | Redeem entire CRT balance |
 
-## Development
-
-### Formatting
-
-```bash
-# Format code
-make fmt
-
-# Check formatting
-make fmt_check
-```
-
-### Building
-
-```bash
-# Server
-cd server && npm run build
-
-# Client
-cd client && npm run build
-```
-
-### Docker (Server)
-
-```bash
-cd server
-make push  # Build, tag, and push to AWS ECR
-```
-
-## Deployment
-
-### AWS Infrastructure
-
-The project includes AWS CDK infrastructure for production deployment:
-
-```bash
-cd infra
-npm install
-npm run deploy
-```
-
-This deploys:
-- ECR repository for Docker images
-- ECS service running the MCP server
-- Application Load Balancer with HTTPS
-- CloudWatch logging
-
-### CI/CD
-
-GitHub Actions workflows handle:
-- **Server**: Automated builds and ECR pushes on merge to main
-- **Client**: Formatting checks on pull requests
-- **Infrastructure**: CDK deployment on merge to main
-
 ## Configuration
+
+### MCP Server
+
+The production MCP server is hosted at:
+
+```
+https://mcp.deficarrot.com/mcp
+```
 
 ### Blockchain Addresses
 
@@ -183,22 +109,6 @@ GitHub Actions workflows handle:
 | CRT | `CRTx1JouZhzSU6XytsE42UQraoGqiHgxabocVfARTy2s` |
 | USDC | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` |
 
-### API Endpoints
-
-- **MCP Server (Production)**: `https://mcp.deficarrot.com/mcp`
-- **Carrot Protocol API**: `https://api.deficarrot.com`
-
-## Technology Stack
-
-- **Runtime**: Node.js 22, TypeScript
-- **Server**: Express.js 5.x
-- **MCP SDK**: @modelcontextprotocol/sdk
-- **AI**: Anthropic Claude (claude-3-haiku)
-- **Blockchain**: Solana via @coral-xyz/anchor
-- **Infrastructure**: AWS CDK, ECS, ALB
-- **Validation**: Zod
-- **Logging**: Winston
-
 ## Security
 
 - Transaction signing happens client-side only
@@ -206,15 +116,35 @@ GitHub Actions workflows handle:
 - HTTPS enforced in production
 - Session-based authentication with 24-hour timeout
 
-## TODO
+## Development
 
-- Sticky sessions on ALB
-- Privy wallet user in loop
-- "Buy 10 bonk" functionality
-- "Invest my cash or stables" feature
-- Return version for server
-- Interactive CRT price chart
-- Customized price chart
+For contributors working on the server or infrastructure:
+
+### Repository Structure
+
+```
+mcp-server/
+├── server/          # MCP Server - Express.js backend
+├── client/          # Interactive CLI with Claude AI
+├── infra/           # AWS CDK infrastructure
+└── llm/             # LLM configuration files
+```
+
+### Local Server Development
+
+```bash
+cd server
+npm install
+npm run build
+npm start  # Starts on http://localhost:8080
+```
+
+### Formatting
+
+```bash
+make fmt        # Format code
+make fmt_check  # Check formatting
+```
 
 ## License
 
