@@ -72,6 +72,7 @@ cd infra && npm run deploy
 
 - **CRT Mint**: `CRTx1JouZhzSU6XytsE42UQraoGqiHgxabocVfARTy2s`
 - **USDC Mint**: `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`
+- **MCP Server (Production)**: `https://mcp.deficarrot.com/mcp`
 - **Carrot API**: `https://api.deficarrot.com`
 
 ## Environment Variables

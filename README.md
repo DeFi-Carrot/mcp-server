@@ -59,10 +59,17 @@ npm install
 npm run build
 ```
 
-Create a `.env.local` file:
+Create a `.env.local` file for local development:
 
 ```env
-MCP_SERVER_URL=http://localhost:8080
+MCP_SERVER_URL=http://localhost:8080/mcp
+ANTHROPIC_MODEL_API_KEY=your-anthropic-api-key
+```
+
+Or use the production server:
+
+```env
+MCP_SERVER_URL=https://mcp.deficarrot.com/mcp
 ANTHROPIC_MODEL_API_KEY=your-anthropic-api-key
 ```
 
@@ -178,6 +185,7 @@ GitHub Actions workflows handle:
 
 ### API Endpoints
 
+- **MCP Server (Production)**: `https://mcp.deficarrot.com/mcp`
 - **Carrot Protocol API**: `https://api.deficarrot.com`
 
 ## Technology Stack
