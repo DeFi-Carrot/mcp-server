@@ -109,6 +109,35 @@ https://mcp.deficarrot.com/mcp
 | CRT | `CRTx1JouZhzSU6XytsE42UQraoGqiHgxabocVfARTy2s` |
 | USDC | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` |
 
+## Testing the MCP Server
+
+Verify the server is running:
+
+```bash
+# Health check - returns server info
+curl https://mcp.deficarrot.com/
+
+# Initialize an MCP session
+curl -X POST https://mcp.deficarrot.com/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "initialize",
+    "params": {
+      "protocolVersion": "2024-11-05",
+      "capabilities": {},
+      "clientInfo": {"name": "test", "version": "1.0.0"}
+    },
+    "id": 1
+  }'
+
+# List available tools (use mcp-session-id from initialize response)
+curl -X POST https://mcp.deficarrot.com/mcp \
+  -H "Content-Type: application/json" \
+  -H "mcp-session-id: <SESSION_ID>" \
+  -d '{"jsonrpc": "2.0", "method": "tools/list", "id": 2}'
+```
+
 ## Security
 
 - Transaction signing happens client-side only
